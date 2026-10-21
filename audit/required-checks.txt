@@ -1,0 +1,40 @@
+# Every line is a CRITICAL check: a release is only allowed when all of them PASS in one run of audit\run-audit.ps1.
+# A check that did not report at all counts as FAILED ("NOT RUN"), so a check that crashes or is skipped cannot hide.
+# Format:  ID | where it runs | what it proves
+BUILD-OK              | script | the mod and the launcher build without errors, and the audited mod is the one installed for the run
+LZ-ROUNDTRIP          | game   | the compressor gives back exactly what went in (edge cases and real plant data)
+LZ-HOSTILE            | game   | garbage, absurd sizes and length bombs only cause ordinary errors: no crash, no giant allocation
+GATE-ROUTING          | game   | network messages are routed by the rules: only the host's world is accepted, oversized data is dropped
+SAVE-PATHS            | game   | every save goes to coop-saves and Steam Cloud saving is off
+GUEST-ISOLATION       | game   | as a guest, saving (even forced) never changes my own save files
+PLANT-SEND            | game   | a growing plant is announced, not more often than every 3 s, and its final state is sent
+PLANT-SIZE            | game   | one plant update stays small (under 100 KB) and cheap to make (under 60 ms)
+PLANT-CONVERGE        | game   | a copy that only has an older plant ends up identical to the sender's, islands counter included
+PLANT-REBUILD         | game   | when updating in place fails, the fallback rebuild still gives the identical plant (fault injected)
+PLANT-NOLEAK          | game   | sending plants does not pile up the game's after-load callbacks (they later crash on deleted branches)
+PLANT-OWNER           | game   | a received plant is never echoed, a plant a friend is growing is not overwritten, sending resumes afterwards
+ISLAND-ATTACH         | game   | an island a friend connected shows as connected on my side
+ISLAND-COUNTER        | game   | connecting an island is announced once, a friend's raises my counter and HUD, nothing is echoed, silly values are refused
+CRYSTAL-SYNC          | game   | a crystal I collect is announced, a friend's disappears here and counts for the team, a made-up one does nothing
+MSG-FUZZ              | game   | hundreds of broken and hostile messages change nothing, escape nowhere and are never slow
+UPDATE-OFFLINE-FAST   | exe    | a dead or hanging update server delays the start by seconds at most and touches nothing
+UPDATE-STAGED-APPLY   | exe    | a newer mod is downloaded first, installed at the next start, the old one is kept
+UPDATE-TAMPER-REJECT  | exe    | a download that does not match its SHA-256 is never staged or installed
+UPDATE-NO-DOWNGRADE   | exe    | the same or an older version changes nothing
+UPDATE-BAD-MANIFEST   | exe    | broken manifests and non-https download addresses are ignored without a crash
+UPDATE-STAGE-TAMPER   | exe    | a staged file changed after download, or not newer, is refused and removed
+PATCH-CORRECT         | exe    | the patcher adds exactly one call to the mod at the start of SteamManager.Awake to the supported Steam build
+INSTALL-PATCHED       | exe    | the installed game really calls the mod when it starts
+GAME-STARTS-MODDED    | script | the modded game starts, loads the mod, reaches the world on its own and does not crash
+NO-UNEXPECTED-ERRORS  | script | the mod log and the Unity log contain no errors or exceptions from the mod during the whole run
+ORIGINAL-UNTOUCHED    | script | the real Steam save files and the original Grow Home assembly are exactly as before the run
+AUDIT-RESTORED        | script | the test copy's saves, logs and settings are put back exactly as they were before the run
+STARTUP-FAST          | game   | the start menu is reached quickly (the intro logo screens are skipped)
+LAUNCH-VERIFIED       | script | the real launcher starts the co-op copy on this PC and confirms the mod loaded, within 60 s
+LAUNCH-VERIFY         | exe    | the launcher tells apart: mod loaded, regular game started instead, nothing started, game closed again, mod missing
+RUNNING-GAME          | exe    | a regular Grow Home that is already running is told apart from the co-op copy
+BORROWER-DETECT       | exe    | a Steam account that only borrows the game (Family Sharing) is recognised, so it is started through Steam
+STEAM-LAUNCH-OPTION   | exe    | Steam's launch option that makes Play start the co-op copy is edited safely: only that line, exact undo, damaged files refused, real settings files read
+INSTALL-FAST          | exe    | the install links the big data files instead of copying (seconds, no extra disk), never links what the game or patcher writes, deleting the copy never touches the original
+UPDATE-BACKGROUND     | exe    | on a very slow network the short check gives up harmlessly, the background check is patient, coop-noupdate.txt switches checking off completely, and the game is told about a downloaded update
+UPDATE-NOTICE         | game   | the game shows "mod update downloaded, restart to use it" once, and ignores damaged notes

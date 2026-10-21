@@ -125,6 +125,9 @@ namespace CoopMod
             }
         }
 
+        // The lobby owner is the player who made the code: the host whose world everybody plays in (0 when not in a lobby).
+        public ulong OwnerId() { return InLobby ? SteamMatchmaking.GetLobbyOwner(Id).m_SteamID : 0UL; }
+
         // Used by the P2P layer: is this Steam user in my lobby right now?
         public bool IsMember(ulong user)
         {

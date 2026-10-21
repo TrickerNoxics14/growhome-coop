@@ -17,6 +17,7 @@ namespace CoopMod
         public static void Redirect(string root)
         {
             Root = root;
+            try { string gs = Path.Combine(root, "guest-session"); if (Directory.Exists(gs)) Directory.Delete(gs, true); } catch (Exception) { }   // a guest session never outlives the game
             Directory.CreateDirectory(Path.Combine(root, "Levels"));
             SaveSystem.m_playerSavePath = root;
             SaveSystem.m_levelFilesPath = Path.Combine(root, "Levels");
@@ -69,6 +70,28 @@ namespace CoopMod
     {
         const byte MsgRequest = 1, MsgSnapshot = 2;
         public static string Status = "";
+        public static bool GuestMode;   // I joined somebody else's world: my own save must not be touched
+        public static bool IsSnapshot(byte[] m) { return m != null && m.Length > 0 && m[0] == MsgSnapshot; }
+
+        // Guests play in the host's world. Point every save at a throwaway folder first so the guest's own save file is never read-modify-written.
+        public static void EnterGuestMode()
+        {
+            if (GuestMode) return;
+            GuestMode = true;
+            try
+            {
+                string root = Path.Combine(SaveGuard.Root, "guest-session");
+                if (Directory.Exists(root)) Directory.Delete(root, true);
+                Directory.CreateDirectory(Path.Combine(root, "Levels"));
+                string profile = Path.Combine(SaveGuard.Root, "PlayerProfile.sav");
+                if (File.Exists(profile)) File.Copy(profile, Path.Combine(root, "PlayerProfile.sav"), true);
+                SaveSystem.m_playerSavePath = root;
+                SaveSystem.m_levelFilesPath = Path.Combine(root, "Levels");
+                CoopBehaviour.Log("guest mode: saves redirected to " + root + "; my own save is untouched");
+                CoopUI.Toast("GUEST MODE: YOUR OWN SAVE IS SAFE");
+            }
+            catch (Exception e) { CoopBehaviour.Log("guest mode failed: " + e.GetType().Name + " " + e.Message); }
+        }
 
         // Only touch the world when a game is actually running: BUD exists, the game says the player is in game, and no load is in progress.
         public static bool InWorld()

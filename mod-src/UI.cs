@@ -148,13 +148,13 @@ namespace CoopMod
 
         public class Chip { public string Name; public bool Ok; }
 
-        public static void StatusBar(int myNumber, List<Chip> players, string hint, string codeText, string notice)
+        public static void StatusBar(string who, List<Chip> players, string hint, string codeText, string notice)
         {
             if (Hidden) return;
             Build();
             DrawToasts();
             float pad = 12f * S, rowH = 22f * S;
-            string title = "B.U.D. LINK   YOU = PLAYER " + myNumber;
+            string title = "B.U.D. LINK   " + who;
             float w1 = Width(title, 14);
             foreach (var p in players) w1 += Width("   >>> " + p.Name.ToUpper(), 14);
             float w2 = Width(hint, 12) + (codeText.Length > 0 ? Width("   CODE " + codeText, 13) : 0f);

@@ -9,12 +9,19 @@ namespace CoopMod
     // Things every player should see the same, synced as small events instead of reloading the whole world:
     //  - crystals: when someone collects one, everybody loses that crystal and the team's crystal count goes up
     //  - plants: when a plant (root + branches + stems, plus the nutrient sources attached to it) changes, that plant is sent to everyone
+    // Plants have ONE owner at a time: whoever started changing it. Others only receive, so two players climbing the same plant never overwrite each other.
     // Switch the whole thing off by creating coop-noshare.txt next to the exe.
     public static class SharedWorld
     {
-        const byte MsgPlant = 4, MsgShard = 5;
+        const byte MsgPlant = 4, MsgShard = 5, MsgIsland = 6;
+        const float MinResend = 3f;          // while a plant keeps growing, send at most this often (the data is big)
+        const float OwnerHold = 8f;          // a plant stays owned this long after the owner's last update
+        const int MaxRaw = 4 * 1024 * 1024;  // refuse anything that unpacks to more than this
+        const int MaxIslands = 60;           // sanity limit for the island counter in a friend's message
+
         public static bool Enabled = true;
         public static string Status = "";
+        public static ulong MyId;
 
         static MethodInfo miSaveObject, miLoadScene;
         static bool reflectionTried, reflectionOk;
@@ -24,14 +31,21 @@ namespace CoopMod
 
         static readonly Dictionary<string, int> lastSig = new Dictionary<string, int>();
         static readonly Dictionary<string, float> lastSent = new Dictionary<string, float>();
+        static readonly Dictionary<string, KeyValuePair<ulong, float>> owner = new Dictionary<string, KeyValuePair<ulong, float>>();   // plant id -> (owner, until)
         static readonly HashSet<string> dirty = new HashSet<string>();
         static readonly List<byte[]> outbox = new List<byte[]>();
         static float nextCheck, lastPlantToast;
 
-        public static bool IsMessage(byte[] m) { return m != null && m.Length > 0 && (m[0] == MsgPlant || m[0] == MsgShard); }
+        // counters and hooks for the automated self test (SelfTest.cs); harmless in normal play
+        public static ITransport TestSink;                    // when set, plant updates go here instead of to the network
+        public static int StatApplied, StatInPlaceFailed, StatRebuilt, StatApplyFailed, StatRejected;
+        public static bool QuietRejects;                      // set by the fuzz test, which sends hundreds of bad messages on purpose: keeps the log readable
+        public static bool TestFailInPlaceOnce;               // fault injection: the next in-place plant update fails, so the rebuild path is exercised
 
-        // After the whole world was replaced (F6/F7, join): forget what I knew and give things a few seconds to settle.
-        public static void Rebaseline() { quietUntil = Time.time + 6f; lastSig.Clear(); dirty.Clear(); }
+        public static bool IsMessage(byte[] m) { return m != null && m.Length > 0 && (m[0] == MsgPlant || m[0] == MsgShard || m[0] == MsgIsland); }
+
+        // After the whole world was replaced (join): forget what I knew and give things a few seconds to settle.
+        public static void Rebaseline() { quietUntil = Time.time + 6f; lastSig.Clear(); dirty.Clear(); owner.Clear(); lastIslandCount = -1; attachedIds.Clear(); }
 
         static bool InitReflection()
         {
@@ -47,6 +61,22 @@ namespace CoopMod
             }
             catch (Exception e) { CoopBehaviour.Log("shared world: reflection failed " + e.GetType().Name); }
             return reflectionOk;
+        }
+
+        // One line describing an exception, with the first frames of its stack (the game's Mono prints "[0x00000] in <filename unknown>:0" after every frame: dropped).
+        public static string Short(Exception e)
+        {
+            var inner = e is TargetInvocationException && e.InnerException != null ? e.InnerException : e;
+            var sb = new System.Text.StringBuilder(inner.GetType().Name + ": " + inner.Message.Replace('\n', ' '));
+            string[] lines = (inner.StackTrace ?? "").Split('\n');
+            for (int i = 0; i < lines.Length && i < 9; i++)
+            {
+                string l = lines[i].Trim();
+                int cut = l.IndexOf(" [0x");
+                if (cut > 0) l = l.Substring(0, cut);
+                if (l.Length > 0) sb.Append(i == 0 ? " @ " : " < ").Append(l);
+            }
+            return sb.ToString();
         }
 
         // ---- crystals --------------------------------------------------------------------------------------------------------------
@@ -103,6 +133,9 @@ namespace CoopMod
             }
             s = s * 31 + root.m_Branches.Count;
             s = s * 31 + root.GetComponentsInChildren<SaveInfo>(true).Length;
+            s = s * 31 + root.m_connectedIslands;                       // the "3/6" islands counter on the HUD
+            s = s * 31 + root.m_requiredIslands;
+            s = s * 31 + (int)(root.TrunkGrowthFraction * 1000f);
             return s;
         }
 
@@ -127,7 +160,16 @@ namespace CoopMod
         }
 
         // Same layout the game uses for a whole level, but only for the given objects.
+        // Saving a plant makes the game queue "after the next load" callbacks for every branch (and nutrient source). I never load from this data, so
+        // put the queue back as it was; otherwise it grows with every send and later runs against branches that no longer exist.
         static byte[] Serialize(List<SaveInfo> infos)
+        {
+            var queued = SaveSystem.OnLoadComplete;
+            try { return SerializeInner(infos); }
+            finally { SaveSystem.OnLoadComplete = queued; }
+        }
+
+        static byte[] SerializeInner(List<SaveInfo> infos)
         {
             SaveSystem.m_loadedDataVersion = 91;
             var scene = new SaveBlock(true) { Type = SaveBlock.BlockType.Scene };
@@ -157,45 +199,257 @@ namespace CoopMod
             return ser.Bytes;
         }
 
-        static void ApplyPlant(byte[] msg)
-        {
-            if (!WorldSync.InWorld() || !InitReflection()) return;
-            var r = new BinaryReader(new MemoryStream(msg)); r.ReadByte();
-            string rootId = r.ReadString();
-            int len = r.ReadInt32();
-            byte[] data = r.ReadBytes(len);
+        // The game's Mono cannot do GZipStream (no native zlib helper), so this uses our own small compressor (Lz.cs).
+        public static byte[] Compress(byte[] raw) { return Lz.Pack(raw); }
 
+        static byte[] Decompress(byte[] comp, int rawLen)
+        {
+            if (rawLen < 0 || rawLen > MaxRaw) throw new FormatException("bad size");
+            return Lz.Unpack(comp, rawLen);
+        }
+
+        // Reads an update into the game's block tree without touching the world. A damaged update fails here, before anything was changed.
+        static SaveBlock Parse(byte[] data)
+        {
+            SaveSystem.m_loadedDataVersion = 91;
+            var ser = new Serializer(false); ser.Bytes = data;
+            var block = new SaveBlock(false); block.Serialize(ser);
+            return block;
+        }
+
+        static bool HasPlant(string rootId)
+        {
+            foreach (PlantRoot pr in UnityEngine.Object.FindObjectsOfType(typeof(PlantRoot))) if (IdOf(pr) == rootId) return true;
+            return false;
+        }
+
+        static byte[] SnapshotOf(string rootId)
+        {
+            foreach (PlantRoot pr in UnityEngine.Object.FindObjectsOfType(typeof(PlantRoot))) if (IdOf(pr) == rootId) return Serialize(GroupFor(pr));
+            return null;
+        }
+
+        // One try at loading a plant update into the scene. Everything not in the update keeps its state.
+        static void LoadUpdate(byte[] data)
+        {
+            var block = Parse(data);
             var existing = new List<SaveInfo>();
             var prior = new List<bool>();
             foreach (SaveInfo si in UnityEngine.Object.FindObjectsOfType(typeof(SaveInfo))) { existing.Add(si); prior.Add(si.m_hasSaveData); si.m_hasSaveData = true; }   // keeps the loader from deleting everything not in this update
             applying = true;
             try
             {
-                SaveSystem.m_loadedDataVersion = 91;
-                var ser = new Serializer(false); ser.Bytes = data;
-                var block = new SaveBlock(false); block.Serialize(ser);
+                SaveSystem.OnLoadComplete = null;      // callbacks left over from earlier saves point at objects that may be gone; only this load's own should run
                 miLoadScene.Invoke(null, new object[] { block });
-                Status = "a friend's plant updated"; if (Time.time - lastPlantToast > 8f) { lastPlantToast = Time.time; CoopUI.Toast("BEANSTALK SIGNAL RECEIVED"); }
             }
-            catch (Exception e) { CoopBehaviour.Log("shared: applying plant failed " + e.GetType().Name + " " + (e.InnerException != null ? e.InnerException.Message : e.Message)); }
             finally
             {
                 applying = false;
                 SaveSystem.loadingScene = false;
+                SaveSystem.OnLoadComplete = null;      // a failed load must not leave its callbacks queued for the next one
                 for (int i = 0; i < existing.Count; i++) if (existing[i] != null) existing[i].m_hasSaveData = prior[i];
             }
+        }
+
+        // If updating in place fails (my copy of the plant differs in structure), throw away what the plant grew at runtime and rebuild it from the update.
+        // Parts the level designers placed in the scene (the crown on top of the trunk, ...) can never be re-created by a load, so they are kept.
+        static void RemovePlantCopy(string rootId)
+        {
+            foreach (PlantRoot pr in UnityEngine.Object.FindObjectsOfType(typeof(PlantRoot)))
+            {
+                if (IdOf(pr) != rootId) continue;
+                var doomed = new List<GameObject>();       // collect first: destroying a branch also destroys the parts below it
+                foreach (var si in pr.GetComponentsInChildren<SaveInfo>(true))
+                    if (si != null && si.gameObject != pr.gameObject && si.m_runtimeSpawned) doomed.Add(si.gameObject);
+                foreach (var go in doomed)
+                {
+                    if (go == null) continue;
+                    foreach (var keep in go.GetComponentsInChildren<SaveInfo>(true))               // a scene-placed part hanging below a doomed one moves up to the plant root
+                        if (keep != null && keep.gameObject != go && !keep.m_runtimeSpawned) keep.transform.parent = pr.transform;
+                    if (pr.m_CrownObject != null && pr.m_CrownObject.IsChildOf(go.transform)) pr.m_CrownObject.parent = pr.transform;
+                }
+                foreach (var go in doomed) if (go != null) UnityEngine.Object.DestroyImmediate(go);
+                pr.m_Branches.Clear();
+            }
+        }
+
+        static void ApplyPlant(byte[] msg)
+        {
+            if (!WorldSync.InWorld() || !InitReflection()) return;
+            var r = new BinaryReader(new MemoryStream(msg)); r.ReadByte();
+            string rootId = r.ReadString();
+            ulong sender = r.ReadUInt64();
+            int rawLen = r.ReadInt32(); int compLen = r.ReadInt32(); uint sum = r.ReadUInt32();
+            if (compLen < 0 || compLen > msg.Length) throw new FormatException("bad packed size");
+            byte[] data = Decompress(r.ReadBytes(compLen), rawLen);
+            if (Lz.Checksum(data) != sum) throw new FormatException("the update is damaged (checksum)");
+            if (!HasPlant(rootId)) throw new FormatException("a plant I do not have");
+            Parse(data);                              // a damaged update is thrown out here: the fallback below would otherwise destroy my plant for nothing
+
+            owner[rootId] = new KeyValuePair<ulong, float>(sender, Time.time + OwnerHold);   // they are growing it: I only receive until they are done
+            try { if (TestFailInPlaceOnce) { TestFailInPlaceOnce = false; throw new InvalidOperationException("[test] injected in-place failure"); } LoadUpdate(data); Status = "a friend's plant updated"; StatApplied++; }
+            catch (Exception e)
+            {
+                StatInPlaceFailed++;
+                if (!QuietRejects) CoopBehaviour.Log("shared: in-place plant update failed (" + Short(e) + "); rebuilding my copy of that plant");
+                byte[] mine = null;
+                try { mine = SnapshotOf(rootId); } catch (Exception) { }          // so a rebuild that fails too can be undone
+                try { RemovePlantCopy(rootId); LoadUpdate(data); Status = "a friend's plant rebuilt"; StatRebuilt++; }
+                catch (Exception e2)
+                {
+                    StatApplyFailed++;
+                    if (!QuietRejects) CoopBehaviour.Log("shared: rebuilding the plant failed too: " + Short(e2));
+                    if (mine != null)
+                    {
+                        try { RemovePlantCopy(rootId); LoadUpdate(mine); if (!QuietRejects) CoopBehaviour.Log("shared: put my own plant back"); }
+                        catch (Exception e3) { CoopBehaviour.Log("shared: could not put my own plant back: " + Short(e3)); }
+                    }
+                    return;
+                }
+            }
+            if (Time.time - lastPlantToast > 8f) { lastPlantToast = Time.time; CoopUI.Toast("BEANSTALK SIGNAL RECEIVED"); }
+            EnsureGrowingBeanstalk();
             // what I have now is what they have: do not send it straight back
             foreach (PlantRoot pr in UnityEngine.Object.FindObjectsOfType(typeof(PlantRoot)))
             {
                 string id = IdOf(pr);
-                if (id != null) { lastSig[id] = Signature(pr); dirty.Remove(id); lastSent[id] = Time.time; }
+                if (id != null && id == rootId) { lastSig[id] = Signature(pr); dirty.Remove(id); lastSent[id] = Time.time; }
             }
+        }
+
+        // ---- islands -----------------------------------------------------------------------------------------------------------------
+        // Connecting a floating island to the beanstalk changes more than the plant: the game's island counter (PlayerAnalytics) goes up, which
+        // drives the "3/6" islands icon and the next growth stage, and a HUD message pops up. None of that is part of the plant data, so it is sent as its own event.
+
+        static int lastIslandCount = -1;
+        static readonly HashSet<string> attachedIds = new HashSet<string>();
+
+        static FieldInfo growingBeanstalkField;
+
+        // The islands HUD reads the counter from the trunk that "is currently growing"; on a player who never grew it themselves that is empty.
+        static void EnsureGrowingBeanstalk()
+        {
+            try
+            {
+                if (PlantBranch.CurrentlyGrowingBeanstalk != null) return;
+                PlantRoot best = null;
+                foreach (PlantRoot r in UnityEngine.Object.FindObjectsOfType(typeof(PlantRoot)))
+                    if (r.IsTrunk() && r.TrunkGrowthFraction > 0.0001f && (best == null || r.TrunkGrowthFraction > best.TrunkGrowthFraction)) best = r;
+                if (best == null) return;
+                if (growingBeanstalkField == null) growingBeanstalkField = typeof(PlantBranch).GetField("s_currentlyGrowingBeanstalk", BindingFlags.NonPublic | BindingFlags.Static);
+                if (growingBeanstalkField != null) growingBeanstalkField.SetValue(null, best);
+            }
+            catch (Exception e) { CoopBehaviour.Log("shared: islands hud: " + Short(e)); }
+        }
+
+        static void CheckIslands()
+        {
+            if (!Singleton<PlayerAnalytics>.Exists) return;
+            int now = Singleton<PlayerAnalytics>.Instance.m_nutrientIslandsAttched;
+            var current = new HashSet<string>();
+            foreach (NutrientProvider n in UnityEngine.Object.FindObjectsOfType(typeof(NutrientProvider)))
+            {
+                if (!n.m_attached) continue;
+                var si = n.GetComponent<SaveInfo>();
+                if (si != null && !string.IsNullOrEmpty(si.m_uniqueID)) current.Add(si.m_uniqueID);
+            }
+            string fresh = "";
+            foreach (var id in current) if (!attachedIds.Contains(id)) { fresh = id; break; }
+            attachedIds.Clear();
+            foreach (var id in current) attachedIds.Add(id);
+            int before = lastIslandCount;
+            lastIslandCount = now;
+            if (before < 0 || applying || Time.time < quietUntil || now <= before) return;   // first look, world just loaded, or a counter that went down
+
+            // I connected an island: tell everybody, and send the trunk right away
+            var ms = new MemoryStream(); var w = new BinaryWriter(ms);
+            w.Write(MsgIsland); w.Write(MyId); w.Write(now); w.Write(fresh);
+            outbox.Add(ms.ToArray());
+            CoopBehaviour.Log("shared: I connected an island (" + now + " connected" + (fresh.Length > 0 ? ", " + fresh : "") + ")");
+            foreach (PlantRoot r in UnityEngine.Object.FindObjectsOfType(typeof(PlantRoot)))
+            {
+                string id = IdOf(r);
+                if (id == null || !r.IsTrunk() || OwnedByOther(id)) continue;
+                lastSent.Remove(id); dirty.Add(id);
+            }
+        }
+
+        static void ApplyIsland(byte[] msg)
+        {
+            var r = new BinaryReader(new MemoryStream(msg)); r.ReadByte();
+            ulong sender = r.ReadUInt64(); int counter = r.ReadInt32(); string pid = r.ReadString();
+            if (!WorldSync.InWorld() || !Singleton<PlayerAnalytics>.Exists) return;
+            var pa = Singleton<PlayerAnalytics>.Instance;
+            // the next growth stage depends on this number, so a damaged or hostile value must not move it: the game has a few dozen islands at most
+            if (counter < 0 || counter > MaxIslands || counter > pa.m_nutrientIslandsAttched + 8) throw new FormatException("island count out of range: " + counter);
+            if (counter > pa.m_nutrientIslandsAttched) pa.m_nutrientIslandsAttched = counter;
+            lastIslandCount = pa.m_nutrientIslandsAttched;                                      // it is not my connection: never send it back
+            EnsureGrowingBeanstalk();
+            foreach (PlantRoot pr in UnityEngine.Object.FindObjectsOfType(typeof(PlantRoot)))
+            {
+                string id = IdOf(pr);
+                if (id != null && pr.IsTrunk()) owner[id] = new KeyValuePair<ulong, float>(sender, Time.time + OwnerHold);   // they are growing the trunk now
+            }
+            if (!string.IsNullOrEmpty(pid))
+            {
+                attachedIds.Add(pid);
+                foreach (NutrientProvider n in UnityEngine.Object.FindObjectsOfType(typeof(NutrientProvider)))
+                {
+                    var si = n.GetComponent<SaveInfo>();
+                    if (si == null || si.m_uniqueID != pid) continue;
+                    try { n.StartCoroutine("ShowCurrentBeanstalkHeight"); } catch (Exception e) { CoopBehaviour.Log("shared: islands hud popup: " + Short(e)); }   // same altitude + "n/6" popup the connecting player gets
+                    break;
+                }
+            }
+            Status = "a friend connected an island";
+            CoopUI.Toast("A FRIEND CONNECTED AN ISLAND (" + pa.m_nutrientIslandsAttched + ")");
+            CoopBehaviour.Log("shared: a friend connected an island; island count is now " + pa.m_nutrientIslandsAttched);
+        }
+
+        public static byte[] TestShardMessage(string guid)
+        {
+            var ms = new MemoryStream(); var w = new BinaryWriter(ms);
+            w.Write(MsgShard); w.Write(guid);
+            return ms.ToArray();
+        }
+
+        public static byte[] TestIslandMessage(ulong sender, int counter, string providerId)
+        {
+            var ms = new MemoryStream(); var w = new BinaryWriter(ms);
+            w.Write(MsgIsland); w.Write(sender); w.Write(counter); w.Write(providerId ?? "");
+            return ms.ToArray();
         }
 
         // ---- per frame -------------------------------------------------------------------------------------------------------------
 
+        static bool OwnedByOther(string id)
+        {
+            KeyValuePair<ulong, float> o;
+            return owner.TryGetValue(id, out o) && o.Value > Time.time && o.Key != MyId;
+        }
+
+        // ---- self test hooks (see SelfTest.cs) ---------------------------------------------------------------------------------------
+
+        public static string PlantId(PlantRoot r) { return IdOf(r); }
+        public static int PlantSignature(PlantRoot r) { return Signature(r); }
+        public static byte[] TestRaw(PlantRoot r) { InitReflection(); return Serialize(GroupFor(r)); }
+
+        // The same packet Tick would send, as if a friend with the given id had sent it.
+        public static byte[] TestMessage(PlantRoot r, ulong sender, byte[] raw)
+        {
+            byte[] comp = Compress(raw);
+            var ms = new MemoryStream(); var w = new BinaryWriter(ms);
+            w.Write(MsgPlant); w.Write(IdOf(r)); w.Write(sender); w.Write(raw.Length); w.Write(comp.Length); w.Write(Lz.Checksum(raw)); w.Write(comp);
+            return ms.ToArray();
+        }
+
+        public static void TestApply(byte[] msg) { ApplyPlant(msg); }
+        public static void TestRevert(string rootId, byte[] raw) { InitReflection(); RemovePlantCopy(rootId); LoadUpdate(raw); }
+        public static void TestForget(string rootId) { owner.Remove(rootId); lastSig.Remove(rootId); lastSent.Remove(rootId); dirty.Remove(rootId); }
+
         public static void Tick(ITransport broadcast)
         {
+            if (TestSink != null) broadcast = TestSink;
             if (!Enabled || broadcast == null) return;
             Hook();
             foreach (var m in outbox) broadcast.SendReliable(m);
@@ -203,6 +457,10 @@ namespace CoopMod
             if (Time.time < nextCheck) return;
             nextCheck = Time.time + 0.5f;
             if (!WorldSync.InWorld() || !InitReflection()) return;
+
+            try { CheckIslands(); } catch (Exception e) { CoopBehaviour.Log("shared: islands: " + Short(e)); }
+            foreach (var m in outbox) broadcast.SendReliable(m);
+            outbox.Clear();
 
             bool settling = Time.time < quietUntil;
             foreach (PlantRoot root in UnityEngine.Object.FindObjectsOfType(typeof(PlantRoot)))
@@ -212,29 +470,29 @@ namespace CoopMod
                 int sig = Signature(root);
                 int old;
                 if (!lastSig.TryGetValue(id, out old)) { lastSig[id] = sig; continue; }   // first look: just remember
-                if (sig != old)
+                bool changedThisTick = sig != old;
+                if (changedThisTick)
                 {
                     lastSig[id] = sig;
-                    if (!settling) dirty.Add(id);
+                    if (!settling && !OwnedByOther(id)) dirty.Add(id);                       // someone else is growing it: my copy changes only because I got their update
                 }
                 if (!dirty.Contains(id)) continue;
                 float since; if (!lastSent.TryGetValue(id, out since)) since = -99f;
-                bool changedThisTick = sig != old;
-                // while it keeps changing send once a second; once it has been still for a tick, send the final state
-                if (Time.time - since >= 1f || !changedThisTick)
+                // while it keeps changing send at most every MinResend seconds; once it has been still for a tick, send the final state
+                if (changedThisTick && Time.time - since < MinResend) continue;
+                try
                 {
-                    try
-                    {
-                        byte[] data = Serialize(GroupFor(root));
-                        var ms = new MemoryStream(); var w = new BinaryWriter(ms);
-                        w.Write(MsgPlant); w.Write(id); w.Write(data.Length); w.Write(data);
-                        broadcast.SendReliable(ms.ToArray());
-                        lastSent[id] = Time.time;
-                        if (!changedThisTick) dirty.Remove(id);
-                        CoopBehaviour.Log("shared: sent plant " + id + " (" + data.Length + " bytes)");
-                    }
-                    catch (Exception e) { CoopBehaviour.Log("shared: sending plant failed " + e.GetType().Name + " " + (e.InnerException != null ? e.InnerException.Message : e.Message)); dirty.Remove(id); }
+                    byte[] raw = Serialize(GroupFor(root));
+                    byte[] comp = Compress(raw);
+                    var ms = new MemoryStream(); var w = new BinaryWriter(ms);
+                    w.Write(MsgPlant); w.Write(id); w.Write(MyId); w.Write(raw.Length); w.Write(comp.Length); w.Write(Lz.Checksum(raw)); w.Write(comp);
+                    broadcast.SendReliable(ms.ToArray());
+                    lastSent[id] = Time.time;
+                    owner[id] = new KeyValuePair<ulong, float>(MyId, Time.time + OwnerHold);
+                    if (!changedThisTick) dirty.Remove(id);
+                    CoopBehaviour.Log("shared: sent plant " + id + " (" + raw.Length + " bytes, " + comp.Length + " compressed)");
                 }
+                catch (Exception e) { CoopBehaviour.Log("shared: sending plant failed " + Short(e)); dirty.Remove(id); }
             }
         }
 
@@ -245,8 +503,9 @@ namespace CoopMod
             {
                 if (msg[0] == MsgShard) ApplyShard(msg);
                 else if (msg[0] == MsgPlant) ApplyPlant(msg);
+                else if (msg[0] == MsgIsland) ApplyIsland(msg);
             }
-            catch (Exception e) { CoopBehaviour.Log("shared: " + e.GetType().Name + " " + e.Message); }
+            catch (Exception e) { StatRejected++; if (!QuietRejects) CoopBehaviour.Log("shared: rejected a bad message (" + Short(e) + ")"); }
         }
     }
 }

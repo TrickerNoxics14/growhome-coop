@@ -1,6 +1,6 @@
 {
-  "version": 1,
+  "version": 2,
   "dll": "https://raw.githubusercontent.com/TrickerNoxics14/growhome-coop/main/CoopMod.dll",
-  "sha256": "6deb8ea3c45fcb2a43e4a194eeb2a153b5a1879fe7a5b27975847171609d60fc",
-  "notes": "first release: invite codes, shared gems and plants, game-styled UI"
+  "sha256": "31321a7d41bd00754efde9fc0d9931ce74d15c31671eff16512faa79d6c54d43",
+  "notes": "plants and islands stay in sync, starts the co-op copy reliably, updates in the background"
 }

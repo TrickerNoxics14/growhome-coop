@@ -28,7 +28,7 @@ namespace CoopMod
     {
         const float SendInterval = 0.05f; // 20 Hz
         const int MaxPeers = 7;
-        const byte MsgVisibility = 3;
+        const byte MsgVisibility = MessageGate.MsgVisibility;
 
         // network
         SteamHub hub; UdpLanHub lanHub; BroadcastTransport broadcast;
@@ -46,6 +46,21 @@ namespace CoopMod
         // Steam starts the game with its working directory set to the original install, so anchor files to the running exe's folder.
         static string Here(string file) { return Path.Combine(Directory.GetParent(Application.dataPath).FullName, file); }
         public static void Log(string m) { File.AppendAllText(Here(logName), m + "\n"); }
+
+        float nextUpdateNote;
+        // The launcher leaves this file when it has downloaded a newer mod in the background. Returns the message to show (and removes the file), or null.
+        public static string TakeUpdateNotice(string path)
+        {
+            try
+            {
+                if (!File.Exists(path)) return null;
+                string v = File.ReadAllText(path).Trim();
+                File.Delete(path);
+                int n; if (!int.TryParse(v, out n) || n <= 0 || n > 100000) return null;
+                return "MOD UPDATE " + n + " DOWNLOADED: RESTART THE GAME TO USE IT";
+            }
+            catch (Exception) { return null; }
+        }
 
         static string Arg(string name)
         {
@@ -90,7 +105,10 @@ namespace CoopMod
             LoadPeerSpecs();
             try { string bf = Here("coop-bots.txt"); if (File.Exists(bf)) botsWanted = Math.Min(MaxPeers, int.Parse(File.ReadAllText(bf).Trim())); } catch (Exception) { }
             logName = "coopmod-steam.log";
+            try { string lp = Here(logName); if (File.Exists(lp) && new FileInfo(lp).Length > 3 * 1024 * 1024) { string prev = Here("coopmod-steam.prev.log"); if (File.Exists(prev)) File.Delete(prev); File.Move(lp, prev); } } catch (Exception) { }   // the log never grows past a few MB
+            StartScreen.m_skipIntros = !File.Exists(Here("coop-intro.txt"));   // straight to the start menu: the logo screens only cost time on every start (put coop-intro.txt next to the exe to see them)
             Log("CoopMod loaded; Unity " + Application.unityVersion + "; players to connect to: " + peerSpecs.Count);
+            if (File.Exists(Here("coop-selftest.txt"))) { Log("self test requested (coop-selftest.txt)"); gameObject.AddComponent<SelfTest>(); }
         }
 
         void OnDestroy()
@@ -130,7 +148,7 @@ namespace CoopMod
             SaveGuard.Tick();
             if (Online && AnyConnected) ResumeAfterFocusLoss();
             if (Input.GetKeyDown(KeyCode.F7) && Online) PullWorld();
-            if (Input.GetKeyDown(KeyCode.F6) && Online) WorldSync.Push(broadcast);
+            if (Input.GetKeyDown(KeyCode.F6) && Online) PushWorld();
             if (Input.GetKeyDown(KeyCode.F5)) Census.Run();
             if (Input.GetKeyDown(KeyCode.F8)) DumpPlayer();
             if (Input.GetKeyDown(KeyCode.F9) && !Online) ToggleTestPeer();
@@ -142,6 +160,7 @@ namespace CoopMod
             if (Online && Input.GetKeyDown(KeyCode.F3)) OpenJoinBox();
             if (!Online && Time.time >= nextSteamTry) TryStartSteam();
             if (Online) NetTick();
+            if (Time.realtimeSinceStartup >= nextUpdateNote) { nextUpdateNote = Time.realtimeSinceStartup + 10f; string note = TakeUpdateNotice(Here("coop-update-ready.txt")); if (note != null) { CoopUI.Toast(note); Log("update notice shown: " + note); } }
         }
 
         // ---- who is the host, F7 -------------------------------------------------------------------------------------------------------
@@ -149,28 +168,43 @@ namespace CoopMod
         // The lowest SteamID64 among everyone is the host. Returns null when I am the host.
         Peer HostPeer()
         {
+            // In a lobby the host is whoever made the code (F2). Without a lobby (old Steam-ID lists) it is the lowest SteamID.
+            if (lobby != null && lobby.InLobby)
+            {
+                ulong owner = lobby.OwnerId();
+                if (owner == myId) return null;
+                foreach (var p in peers) if (!p.IsBot && p.Id == owner) return p;
+            }
             Peer best = null;
             foreach (var p in peers) if (!p.IsBot && p.Id < myId && (best == null || p.Id < best.Id)) best = p;
             return best;
         }
 
-        // F7: copy the host's world; if I am the host, copy the first connected player's world.
+        // F7: a guest asks the host for the host's world again. The host's world is the main world, so the host never pulls.
         void PullWorld()
         {
-            Peer src = HostPeer();
-            if (src == null) foreach (var p in peers) if (!p.IsBot && p.Connected) { src = p; break; }
-            if (src == null) { WorldSync.Status = "nobody is connected yet"; return; }
-            WorldSync.Request(src.Link);
+            var host = HostPeer();
+            if (host == null) { CoopUI.Toast("YOU ARE THE HOST: THIS IS THE MAIN WORLD"); return; }
+            WorldSync.EnterGuestMode();
+            WorldSync.Request(host.Link);
         }
 
-        // The host's world is pulled once, a few seconds after the link comes up and I am in the world.
+        // F6: only the host may send a world, and only to the guests.
+        void PushWorld()
+        {
+            if (HostPeer() != null) { CoopUI.Toast("ONLY THE HOST CAN SEND THE WORLD"); return; }
+            WorldSync.Push(broadcast);
+        }
+
+        // A guest copies the host's world once, a few seconds after the link comes up and the guest is in the world.
         void AutoPull()
         {
             var host = HostPeer();
             if (host == null || host.AutoPulled || !host.Connected || Time.time - host.ConnectedAt < 3f) return;
             if (!WorldSync.InWorld()) return;
             host.AutoPulled = true;
-            Log("auto: " + host.Label + " is the host, pulling their world");
+            Log("auto: " + host.Label + " is the host, joining their world as a guest");
+            WorldSync.EnterGuestMode();
             WorldSync.Request(host.Link);
         }
 
@@ -195,6 +229,7 @@ namespace CoopMod
                     if (ids.Contains(id) || ids.Count >= MaxPeers) continue;
                     ids.Add(id);
                 }
+                SharedWorld.MyId = myId;
                 hub = new SteamHub(new List<ulong>());                    // peers are added below / by invite codes
                 broadcast = new BroadcastTransport(allLinks);
                 foreach (ulong id in ids) AddPeerInternal(id, id == myId);
@@ -333,9 +368,14 @@ namespace CoopMod
                 byte[] rel;
                 while ((rel = p.Link.ReceiveReliable()) != null)
                 {
-                    if (rel.Length > 0 && rel[0] == MsgVisibility) ReceiveVisibility(p, rel);
-                    else if (SharedWorld.IsMessage(rel)) SharedWorld.Handle(rel);
-                    else WorldSync.Handle(p.Link, rel);
+                    switch (MessageGate.Classify(rel, HostPeer() == p))
+                    {
+                        case Route.Visibility: ReceiveVisibility(p, rel); break;
+                        case Route.Shared: SharedWorld.Handle(rel); break;
+                        case Route.Oversized: Log("ignored an oversized message from " + p.Label); break;
+                        case Route.SnapshotNotFromHost: Log("ignored world data from " + p.Label + " (not the host)"); break;
+                        case Route.World: if (WorldSync.IsSnapshot(rel)) WorldSync.EnterGuestMode(); WorldSync.Handle(p.Link, rel); break;
+                    }
                 }
             }
             Perf.Begin(); AutoSync.Tick(broadcast, AnyConnected); Perf.End("AutoSync.Tick");
@@ -735,11 +775,13 @@ namespace CoopMod
             var chips = new List<CoopUI.Chip>();
             foreach (var p in peers) chips.Add(new CoopUI.Chip { Name = p.Label, Ok = p.Connected });
             string hint = peers.Count == 0 ? "NOBODY YET   F2 MAKE A CODE   F3 ENTER A CODE"
-                                           : "F2 CODE   F3 JOIN   F6 SEND MY WORLD   F7 GET HOST WORLD   F4 FIND PLAYER";
+                                           : "F2 CODE   F3 JOIN   F7 RE-JOIN HOST WORLD   F4 FIND PLAYER";
             string code = lobby != null && lobby.InLobby ? lobby.Code : "";
             string notice = (WorldSync.Status + " " + SharedWorld.Status).Trim();
             if (code.Length == 0 && lobby != null && lobby.Status.Length > 0) notice = (lobby.Status + "  " + notice).Trim();
-            CoopUI.StatusBar(myNumber, chips, hint, code, notice.ToUpper());
+            var hostNow = HostPeer();
+            string who = hostNow == null ? "PLAYER " + myNumber + "  HOSTING" : "PLAYER " + myNumber + "  GUEST OF " + hostNow.Label.ToUpper();
+            CoopUI.StatusBar(who, chips, hint, code, notice.ToUpper());
         }
 
         // ---- dumps ---------------------------------------------------------------------------------------------------------------------
