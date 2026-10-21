@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><TargetFramework>net35</TargetFramework><AssemblyName>CoopMod</AssemblyName><LangVersion>9</LangVersion></PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies.net35" Version="1.0.3" PrivateAssets="all" />
+    <Reference Include="UnityEngine"><HintPath>../test-install/GrowHome_Data/Managed/UnityEngine.dll</HintPath></Reference>
+    <Reference Include="Assembly-CSharp"><HintPath>Assembly-CSharp.ref.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Assembly-CSharp-firstpass"><HintPath>Assembly-CSharp-firstpass.ref.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+</Project>

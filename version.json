@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "dll": "https://raw.githubusercontent.com/TrickerNoxics14/growhome-coop/main/CoopMod.dll",
+  "sha256": "6deb8ea3c45fcb2a43e4a194eeb2a153b5a1879fe7a5b27975847171609d60fc",
+  "notes": "first release: invite codes, shared gems and plants, game-styled UI"
+}
