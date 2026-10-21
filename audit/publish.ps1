@@ -56,16 +56,26 @@ $rel = Join-Path $Root 'release'; New-Item -ItemType Directory -Force -Path $rel
 Copy-Item $ExeFile (Join-Path $rel 'GrowHomeCoop.exe') -Force
 Copy-Item (Join-Path $Root 'GrowHomeCoop-Setup.bat') (Join-Path $rel 'GrowHomeCoop-Setup.bat') -Force
 
-# 4. commit, push, release
+# 4. commit, push, release (git and gh talk on stderr even when all is well, so their exit codes decide, not their messages; safe to run again)
 Push-Location $RepoDir
+$prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
 try {
-    git rm -q --cached audit/deploy.ps1 2>$null
-    git add -A
-    $msg = "Version ${version}: $Notes`n`nAll critical checks passed for this build (audit/CRITICAL-CHECKS.md). The update is signed (SECURITY.md).`n`nCo-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
-    git commit -q -m $msg
-    git push origin main 2>&1 | Select-Object -Last 1
-    gh release create "v$version" (Join-Path $rel 'GrowHomeCoop.exe') (Join-Path $rel 'GrowHomeCoop-Setup.bat') --repo $Repo --title "Grow Home Co-op v$version" --notes "$Notes`n`nAll critical checks passed for this build. Friends: download GrowHomeCoop.exe and run it. Existing players get the new mod by themselves; the launcher itself changes only when you download it again." --latest 2>&1 | Select-Object -Last 1
-} finally { Pop-Location }
+    git rm -q --cached audit/deploy.ps1 2>$null | Out-Null
+    git add -A 2>$null | Out-Null
+    $pending = git status --porcelain
+    if ($pending) {
+        $msg = "Version ${version}: $Notes`n`nAll critical checks passed for this build (audit/CRITICAL-CHECKS.md). The update is signed (SECURITY.md).`n`nCo-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
+        git commit -q -m $msg 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) { Fail 'git commit failed' }
+    }
+    git push origin main 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { Fail 'git push failed' }
+    $has = gh release view "v$version" --repo $Repo 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        gh release create "v$version" (Join-Path $rel 'GrowHomeCoop.exe') (Join-Path $rel 'GrowHomeCoop-Setup.bat') --repo $Repo --title "Grow Home Co-op v$version" --notes "$Notes`n`nAll critical checks passed for this build. Friends: download GrowHomeCoop.exe and run it. Existing players get the new mod by themselves; the launcher itself changes only when you download it again." --latest 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) { Fail 'creating the release failed' }
+    } else { Say "  release v$version already exists" 'DarkGray' }
+} finally { $ErrorActionPreference = $prev; Pop-Location }
 
 # 5. what friends will really get
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ("gh-verify-" + [Guid]::NewGuid().ToString('N').Substring(0, 8)); New-Item -ItemType Directory -Path $tmp | Out-Null
@@ -82,7 +92,7 @@ try {
         'manifest fingerprint = the mod'     = ($live.sha256 -eq $built -and (Sha $dllPath) -eq $built)
         'signature is valid'                 = $pk.VerifyData($liveData, 'SHA256', [Convert]::FromBase64String($live.signature))
     }
-    gh release download "v$version" --repo $Repo --pattern 'GrowHomeCoop.exe' --dir $tmp --clobber 2>&1 | Out-Null
+    $prev2 = $ErrorActionPreference; $ErrorActionPreference = "Continue"; gh release download "v$version" --repo $Repo --pattern "GrowHomeCoop.exe" --dir $tmp --clobber 2>&1 | Out-Null; $ErrorActionPreference = $prev2
     $checks['release launcher = audited launcher'] = ((Sha (Join-Path $tmp 'GrowHomeCoop.exe')) -eq (Sha $ExeFile))
     foreach ($k in $checks.Keys) { Say ("  {0,-4} {1}" -f $(if ($checks[$k]) { 'OK' } else { 'FAIL' }), $k) $(if ($checks[$k]) { 'Green' } else { 'Red' }); if (-not $checks[$k]) { $ok = $false } }
 } finally { Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue }
