@@ -33,6 +33,7 @@ static partial class Program
         try { AuditRunningGames(tmp); } catch (Exception e) { Check("AUDIT-ERROR", false, "the running-game checks ran to the end", e.GetType().Name + ": " + e.Message); }
         try { AuditVerify(tmp); } catch (Exception e) { Check("AUDIT-ERROR", false, "the launch-verify checks ran to the end", e.GetType().Name + ": " + e.Message); }
         try { AuditInstall(tmp); } catch (Exception e) { Check("AUDIT-ERROR", false, "the install checks ran to the end", e.GetType().Name + ": " + e.Message); }
+        try { AuditGui(tmp, Path.Combine(Path.GetDirectoryName(Path.GetFullPath(auditOut ?? "audit-exe-result.txt")), "window")); } catch (Exception e) { Check("AUDIT-ERROR", false, "the window checks ran to the end", e.GetType().Name + ": " + e.Message + " " + (e.StackTrace ?? "").Split((char)10)[0].Trim()); }
         try { AuditPatch(tmp, realGame); } catch (Exception e) { Check("AUDIT-ERROR", false, "the patch checks ran to the end", e.GetType().Name + ": " + e.Message); }
         try { Directory.Delete(tmp, true); } catch { }
         string text = string.Join("\r\n", auditLines.ToArray()) + "\r\nRESULT fail=" + auditFails + "\r\nDONE\r\n";
@@ -48,9 +49,13 @@ static partial class Program
         return data.Length == expected.Length && data.SequenceEqual(expected);
     }
 
-    static string Manifest(int version, string dll, string sha)
+    static string auditPrivateKey, auditOtherKey;     // throw-away keys: the audit signs with one and trusts it; the real private key is never here
+
+    // A manifest as the author would publish it: signed with the audit's own key (signature = null leaves it unsigned, "wrong" signs with another key).
+    static string Manifest(int version, string dll, string sha, string signature = "good")
     {
-        return "{\"version\": " + version + ", \"dll\": \"" + dll + "\", \"sha256\": \"" + sha + "\", \"notes\": \"audit\"}";
+        string sig = signature == "good" ? SignManifestForTest(auditPrivateKey, version, sha, dll) : signature == "wrong" ? SignManifestForTest(auditOtherKey, version, sha, dll) : signature;
+        return "{\"version\": " + version + ", \"dll\": \"" + dll + "\", \"sha256\": \"" + sha + "\", \"notes\": \"audit\"" + (sig != null ? ", \"signature\": \"" + sig + "\"" : "") + "}";
     }
 
     static byte[] Bytes(string s) { return Encoding.ASCII.GetBytes(s); }
@@ -64,6 +69,9 @@ static partial class Program
         File.WriteAllText(Path.Combine(gameDir, "coop-version.txt"), "1");
         if (Process.GetProcessesByName("GrowHome").Length > 0) { Check("UPDATE-STAGED-APPLY", false, "Grow Home is closed while the updater is checked", "close the game and run the audit again"); return; }
 
+        string realPublicKey = UpdatePublicKeyXml;
+        using (var k1 = new System.Security.Cryptography.RSACryptoServiceProvider(2048)) { auditPrivateKey = k1.ToXmlString(true); UpdatePublicKeyXml = k1.ToXmlString(false); }
+        using (var k2 = new System.Security.Cryptography.RSACryptoServiceProvider(2048)) auditOtherKey = k2.ToXmlString(true);
         var server = new MiniServer();
         try
         {
@@ -165,8 +173,43 @@ static partial class Program
             WriteUpdateReady(5);
             string note = Path.Combine(gameDir, "coop-update-ready.txt");
             Check("UPDATE-BACKGROUND", File.Exists(note) && File.ReadAllText(note).Trim() == "5", "the launcher leaves the game a note about the downloaded update", "");
+
+            // 8. only the author can update: signatures, allowed hosts, redirects, size
+            byte[] v6 = Bytes("mod version six");
+            string v6url = server.Url("/mod6.dll"), v6sha = Sha256(v6);
+            server.Serve("/mod6.dll", v6);
+            Action<string, string> tryManifest = (name, json) => { };
+            Func<string, int> staged6 = json => { server.Serve(manifestPath, json); File.Delete(StagedDll); File.Delete(StagedInfo); return CheckForUpdate(false); };
+            Check("UPDATE-SIGNED", staged6(Manifest(6, v6url, v6sha)) == 6 && File.Exists(StagedDll), "an update signed by the author is accepted", "");
+            File.Delete(StagedDll); File.Delete(StagedInfo);
+            Check("UPDATE-SIGNED", staged6(Manifest(6, v6url, v6sha, null)) == 0 && !File.Exists(StagedDll), "an update with no signature is refused", "");
+            Check("UPDATE-SIGNED", staged6(Manifest(6, v6url, v6sha, "wrong")) == 0 && !File.Exists(StagedDll), "an update signed with somebody else's key is refused", "");
+            Check("UPDATE-SIGNED", staged6(Manifest(6, v6url, v6sha, "not base64 at all !!")) == 0 && !File.Exists(StagedDll), "a damaged signature is refused", "");
+            string goodSig = SignManifestForTest(auditPrivateKey, 6, v6sha, v6url);
+            byte[] otherFile = Bytes("a different file entirely"); server.Serve("/modx6.dll", otherFile);
+            Check("UPDATE-SIGNED", staged6(Manifest(6, v6url, Sha256(otherFile), goodSig)) == 0 && !File.Exists(StagedDll), "a signature does not carry over to a different file fingerprint", "");
+            Check("UPDATE-SIGNED", staged6(Manifest(6, server.Url("/modx6.dll"), v6sha, goodSig)) == 0 && !File.Exists(StagedDll), "a signature does not carry over to a different download address", "");
+            Check("UPDATE-SIGNED", staged6(Manifest(7, v6url, v6sha, goodSig)) == 0 && !File.Exists(StagedDll), "an old signed manifest cannot be replayed with a higher version number", "");
+            UpdatePublicKeyXml = realPublicKey;
+            Check("UPDATE-SIGNED", !VerifyManifest(6, v6sha, v6url, goodSig), "the key built into the launcher does not accept a signature it did not make", "");
+            using (var probe = new System.Security.Cryptography.RSACryptoServiceProvider()) { probe.FromXmlString(realPublicKey); Check("UPDATE-SIGNED", probe.KeySize >= 3072 && !realPublicKey.Contains("<D>") && !realPublicKey.Contains("<P>"), "the built-in key is a 3072-bit public key with no private part", probe.KeySize + " bits"); }
+            using (var k = new System.Security.Cryptography.RSACryptoServiceProvider(2048)) { k.FromXmlString(auditPrivateKey); UpdatePublicKeyXml = k.ToXmlString(false); }
+
+            bool hostsOk = UrlAllowed("https://raw.githubusercontent.com/TrickerNoxics14/growhome-coop/main/CoopMod.dll") && UrlAllowed("https://github.com/TrickerNoxics14/growhome-coop/releases/download/v2/x.dll");
+            bool prod2 = auditMode; auditMode = false;
+            bool evilBlocked = !UrlAllowed("https://evil.example/mod.dll") && !UrlAllowed("https://raw.githubusercontent.com.evil.example/mod.dll") && !UrlAllowed("https://user:pw@github.com/mod.dll")
+                && !UrlAllowed("http://github.com/mod.dll") && !UrlAllowed("https://127.0.0.1/mod.dll") && !UrlAllowed("file:///C:/Windows/notepad.exe") && !UrlAllowed("ftp://github.com/x") && !UrlAllowed("not a url") && !UrlAllowed("http://127.0.0.1:80/x");
+            auditMode = prod2;
+            Check("UPDATE-SIGNED", hostsOk && evilBlocked, "downloads are only allowed from GitHub over https (look-alike hosts, passwords in the address, plain http and local files are not)", "github ok=" + hostsOk + ", others blocked=" + evilBlocked);
+
+            server.Redirect("/mod6r.dll", "http://evil.example/mod.dll");
+            string redirectedManifest = Manifest(6, server.Url("/mod6r.dll"), v6sha);
+            Check("UPDATE-SIGNED", staged6(redirectedManifest) == 0 && !File.Exists(StagedDll), "a download that is redirected somewhere else is refused", "");
+            byte[] huge = new byte[9 * 1024 * 1024]; server.Serve("/mod6big.dll", huge);
+            Check("UPDATE-SIGNED", staged6(Manifest(6, server.Url("/mod6big.dll"), Sha256(huge))) == 0 && !File.Exists(StagedDll), "a download far bigger than a mod is refused", "");
+            server.Serve("/mod6.dll", v6);
         }
-        finally { server.Stop(); }
+        finally { server.Stop(); UpdatePublicKeyXml = realPublicKey; }
     }
 
     static bool StartsWithInit(string assemblyPath)
@@ -221,6 +264,8 @@ static partial class Program
         public void Serve(string path, string text) { Serve(path, Encoding.UTF8.GetBytes(text)); }
         public void Serve(string path, byte[] body) { lock (routes) { routes[path] = body; hangs.Remove(path); } }
         public void Hang(string path) { lock (routes) hangs.Add(path); }
+        readonly Dictionary<string, string> redirects = new Dictionary<string, string>();
+        public void Redirect(string path, string to) { lock (routes) redirects[path] = to; }
         public void Delay(string path, int ms) { lock (routes) delays[path] = ms; }
         public void Stop() { stopped = true; try { listener.Stop(); } catch { } }
 
@@ -250,6 +295,8 @@ static partial class Program
                     lock (routes) { hang = hangs.Contains(path); routes.TryGetValue(path, out body); delays.TryGetValue(path, out delay); }
                     if (delay > 0) Thread.Sleep(delay);
                     if (hang) { Thread.Sleep(30000); return; }
+                    string moved; lock (routes) redirects.TryGetValue(path, out moved);
+                    if (moved != null) { byte[] r = Encoding.ASCII.GetBytes("HTTP/1.1 302 Found\r\nLocation: " + moved + "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"); s.Write(r, 0, r.Length); return; }
                     byte[] headBytes = Encoding.ASCII.GetBytes((body == null ? "HTTP/1.1 404 Not Found" : "HTTP/1.1 200 OK") + "\r\nContent-Length: " + (body == null ? 0 : body.Length) + "\r\nConnection: close\r\n\r\n");
                     s.Write(headBytes, 0, headBytes.Length);
                     if (body != null) s.Write(body, 0, body.Length);

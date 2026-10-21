@@ -40,23 +40,38 @@ namespace CoopMod
             return ms.ToArray();
         }
 
+        // Everything a pose packet says comes from another player's PC, so it is checked before anything uses it: a short or damaged packet, a number that is not
+        // a number, a position far outside the world or a speed no BUD can reach is thrown away (null) instead of moving anybody's character or stopping the network loop.
+        const float MaxCoord = 50000f, MaxSpeed = 400f;
+        static bool Sane(Vector3 v, float limit) { return Sane(v.x, limit) && Sane(v.y, limit) && Sane(v.z, limit); }
+        static bool Sane(float f, float limit) { return !float.IsNaN(f) && !float.IsInfinity(f) && Math.Abs(f) <= limit; }
+
         public static PlayerState Read(byte[] data)
         {
-            if (data.Length < 52 || data[0] != 0xC0) return null;
-            var r = new BinaryReader(new MemoryStream(data)); r.ReadByte();
-            var s = new PlayerState();
-            s.seq = r.ReadUInt32();
-            s.pos = R(r); s.vel = R(r); s.camForward = R(r);
-            s.move = new Vector2(r.ReadSingle(), r.ReadSingle());
-            byte f = r.ReadByte();
-            s.jumpDown = (f & 1) != 0; s.jumpUp = (f & 2) != 0; s.leftGrab = (f & 4) != 0; s.rightGrab = (f & 8) != 0;
-            s.skin = r.ReadByte();
-            s.jumpScale = r.ReadSingle();
-            int n = r.ReadByte();
-            int vl = r.ReadUInt16(); s.vis = r.ReadBytes(vl);
-            s.held = new Held[n];
-            for (int i = 0; i < n; i++) { s.held[i].id = r.ReadInt32(); s.held[i].pos = R(r); s.held[i].vel = R(r); s.held[i].rot = new Quaternion(r.ReadSingle(), r.ReadSingle(), r.ReadSingle(), r.ReadSingle()); }
-            return s;
+            if (data == null || data.Length < 52 || data.Length > 20000 || data[0] != 0xC0) return null;
+            try
+            {
+                var r = new BinaryReader(new MemoryStream(data)); r.ReadByte();
+                var s = new PlayerState();
+                s.seq = r.ReadUInt32();
+                s.pos = R(r); s.vel = R(r); s.camForward = R(r);
+                s.move = new Vector2(r.ReadSingle(), r.ReadSingle());
+                byte f = r.ReadByte();
+                s.jumpDown = (f & 1) != 0; s.jumpUp = (f & 2) != 0; s.leftGrab = (f & 4) != 0; s.rightGrab = (f & 8) != 0;
+                s.skin = r.ReadByte();
+                s.jumpScale = r.ReadSingle();
+                int n = r.ReadByte();
+                int vl = r.ReadUInt16();
+                if (vl > 4096 || r.BaseStream.Position + vl > data.Length) return null;
+                s.vis = r.ReadBytes(vl);
+                s.held = new Held[n];
+                for (int i = 0; i < n; i++) { s.held[i].id = r.ReadInt32(); s.held[i].pos = R(r); s.held[i].vel = R(r); s.held[i].rot = new Quaternion(r.ReadSingle(), r.ReadSingle(), r.ReadSingle(), r.ReadSingle()); }
+                if (!Sane(s.pos, MaxCoord) || !Sane(s.vel, MaxSpeed) || !Sane(s.camForward, 1000f) || !Sane(s.move.x, 100f) || !Sane(s.move.y, 100f) || !Sane(s.jumpScale, 10f)) return null;
+                foreach (var h in s.held)
+                    if (!Sane(h.pos, MaxCoord) || !Sane(h.vel, MaxSpeed) || !Sane(h.rot.x, 10f) || !Sane(h.rot.y, 10f) || !Sane(h.rot.z, 10f) || !Sane(h.rot.w, 10f)) return null;
+                return s;
+            }
+            catch (Exception) { return null; }
         }
 
         static void W(BinaryWriter w, Vector3 v) { w.Write(v.x); w.Write(v.y); w.Write(v.z); }

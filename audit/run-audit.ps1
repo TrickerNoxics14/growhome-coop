@@ -199,16 +199,19 @@ else {
         }
         Copy-Item $ModDll (Join-Path $Managed 'CoopMod.dll') -Force
         Set-Content (Join-Path $GameDir 'coop-selftest.txt') $(if ($Quick) { 'quick' } else { 'audit' }) -Encoding ascii
-        # start the game through the real launcher, the way a friend would: it must start the co-op copy and confirm that the mod loaded
-        $launcherOut = Join-Path $Report 'launcher-console.txt'
+        # start the game the way a friend does: open the launcher window; here it presses Play by itself. It must start the co-op copy, confirm that the mod loaded and close again.
+        $launcherLog = Join-Path (Split-Path $GameDir -Parent) 'launcher.log'
+        $logBefore = if (Test-Path $launcherLog) { @(Get-Content $launcherLog).Count } else { 0 }
         $launchClock = [Diagnostics.Stopwatch]::StartNew()
-        $launcher = Start-Process -FilePath $ExeFile -ArgumentList @('--use-game', "`"$GameDir`"", '--no-update', '--yes', '--game-args', '"-screen-width 800 -screen-height 450"') -PassThru -WindowStyle Hidden -RedirectStandardOutput $launcherOut
-        $null = $launcher.Handle                                    # without this PowerShell loses the exit code of a hidden process
-        Say "  launcher started the game; it plays by itself now, please do not touch it"
+        $launcher = Start-Process -FilePath $ExeFile -ArgumentList @('--use-game', "`"$GameDir`"", '--no-update', '--auto-play', '--game-args', '"-screen-width 800 -screen-height 450"') -PassThru
+        $null = $launcher.Handle                                    # without this PowerShell loses the exit code
+        Say "  launcher window opened and started the game; it plays by itself now, please do not touch it"
         if (-not $launcher.WaitForExit(180000)) { try { $launcher.Kill() } catch { }; $launcherCode = -1 } else { $launcherCode = $launcher.ExitCode }
-        $launcherText = if (Test-Path $launcherOut) { Get-Content $launcherOut -Raw } else { '' }
-        $took = $null; if ($launcherText -match 'Co-op mod loaded \((\d+) s\)') { $took = [int]$Matches[1] }
-        Add-Check 'LAUNCH-VERIFIED' ($launcherCode -eq 0 -and $null -ne $took -and $took -le 60) 'the real launcher starts the co-op copy and confirms that the mod loaded' $(if ($launcherCode -eq 0 -and $null -ne $took) { "mod loaded $took s after the start (limit 60 s), launcher took $([int]$launchClock.Elapsed.TotalSeconds) s" } else { "launcher exit code $launcherCode; output: " + ($launcherText -replace '\s+', ' ').Trim() })
+        $newLines = if (Test-Path $launcherLog) { @(Get-Content $launcherLog | Select-Object -Skip $logBefore) } else { @() }
+        $launcherText = ($newLines -join ' | ')
+        Copy-Item $launcherLog (Join-Path $Report 'launcher.log') -Force -ErrorAction SilentlyContinue
+        $took = $null; $hit = $newLines | Where-Object { $_ -match 'outcome Loaded after (\d+) s' } | Select-Object -Last 1; if ($hit -and $hit -match 'outcome Loaded after (\d+) s') { $took = [int]$Matches[1] }
+        Add-Check 'LAUNCH-VERIFIED' ($launcherCode -eq 0 -and $null -ne $took -and $took -le 60) 'the launcher window starts the co-op copy, confirms that the mod loaded and closes by itself' $(if ($launcherCode -eq 0 -and $null -ne $took) { "mod loaded $took s after the start (limit 60 s), window closed after $([int]$launchClock.Elapsed.TotalSeconds) s" } else { "launcher exit code $launcherCode; log: " + $launcherText })
         $process = Get-Process GrowHome -ErrorAction SilentlyContinue | Select-Object -First 1
         $clock = [Diagnostics.Stopwatch]::StartNew(); $lastShown = ''; $died = $false
         $modLog = Join-Path $GameDir 'coopmod-steam.log'

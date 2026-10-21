@@ -16,14 +16,48 @@ static partial class Program
     static int wrongGameAfterSeconds = 12;      // how long a regular game may run alone before it is called "the wrong game" (the audit shortens it)
     static string gameArgs = "-screen-width 1280 -screen-height 720 -popupwindow";
 
-    static void Say(string s) { Console.WriteLine(s); }
+    // Everything the launcher tells or asks the person goes through these, so the text window and the game-styled window show the same things.
+    static Action<string> sayHook;                       // message line
+    static Func<string, string[], int> chooseHook;       // question + options -> index of the chosen option
+    static Action<int> progressHook;                     // overall progress, 0..100
+    static Action hideHook;                              // the window may go away while a background update check finishes
+
+    static void Say(string s) { if (sayHook != null) sayHook(s); else Console.WriteLine(s); }
+
+    static void Progress(int percent) { if (progressHook != null) progressHook(Math.Max(0, Math.Min(100, percent))); }
+
+    static void ShowInstallProgress(int percent)
+    {
+        if (progressHook != null) progressHook(percent * 60 / 100);        // copying is the first 60 % of an install
+        else if (percent == 100) Console.WriteLine("\r  100%"); else Console.Write("\r  " + percent + "%  ");
+    }
+
+    // A question with a few answers. Text mode lists them by number; the window shows them as menu items.
+    static int Choose(string question, params string[] options)
+    {
+        if (chooseHook != null) return chooseHook(question, options);
+        if (assumeYes) { Console.WriteLine(question + " -> " + options[0]); return 0; }
+        Console.WriteLine(question);
+        for (int i = 0; i < options.Length; i++) Console.WriteLine("  " + (i + 1) + " = " + options[i] + (i == 0 ? " (default)" : ""));
+        Console.Write("> ");
+        int n; return int.TryParse(Console.ReadLine(), out n) && n >= 1 && n <= options.Length ? n - 1 : 0;
+    }
 
     static bool Confirm(string question)
     {
+        if (chooseHook != null) return chooseHook(question, new[] { "Yes", "No" }) == 0;
         Console.Write(question);
         if (assumeYes) { Console.WriteLine("y"); return true; }
         string a = Console.ReadLine();
         return a == null || a.Trim() == "" || a.Trim().ToLower().StartsWith("y");
+    }
+
+    // For questions where the safe answer is no: text mode needs YES typed out.
+    static bool ConfirmStrict(string question)
+    {
+        if (chooseHook != null) return chooseHook(question, new[] { "Replace it", "Cancel" }) == 0;
+        Console.Write(question + " Type YES to continue: ");
+        return Console.ReadLine() == "YES";
     }
 
     static string ModLogPath { get { return Path.Combine(gameDir, "coopmod-steam.log"); } }
@@ -91,6 +125,7 @@ static partial class Program
         Log("start; installed mod version " + InstalledVersion() + "; args: " + string.Join(" ", Environment.GetCommandLineArgs().Skip(1).ToArray()));
         ApplyStaged();
         Say("Grow Home Co-op (mod version " + InstalledVersion() + ")");
+        Progress(10);
 
         // 1. a Grow Home that is already running decides what you will see, so deal with it first
         var running = RunningGames();
@@ -106,6 +141,7 @@ static partial class Program
             Thread.Sleep(1000);
         }
 
+        Progress(20);
         // 2. how to start: an account that only borrows the game can only start it through Steam
         string account = ActiveAccount();
         bool borrower = IsBorrower(ManifestText(), account);
@@ -118,13 +154,14 @@ static partial class Program
         // Looks for a newer mod while the game loads. The game never waits for it. On a slow network (school) the check may take a minute or more:
         // the launcher then stays alive with its window hidden until it is done, and tells the game, which shows a message.
         int updatedTo = 0;
+        Progress(40);
         var updater = noUpdate || UpdatesDisabled() ? null : new Thread(() => { updatedTo = CheckForUpdate(false, true); }) { IsBackground = true };
         if (updater != null) updater.Start();
 
         int code = LaunchAndVerify(viaSteamNow, borrower, true);
         if (updater != null)
         {
-            if (code == 0 && updater.IsAlive) { Say("Checking for a mod update in the background. This window closes by itself."); HideConsole(); updater.Join(150000); }
+            if (code == 0 && updater.IsAlive) { Say("Checking for a mod update in the background. This window closes by itself."); if (hideHook != null) hideHook(); else HideConsole(); updater.Join(150000); }
             else updater.Join(4000);
             if (updatedTo > 0) WriteUpdateReady(updatedTo);
         }
@@ -157,6 +194,7 @@ static partial class Program
             StartDirect();
         }
         Log("started " + (throughSteam ? "through steam" : "directly"));
+        Progress(60);
 
         int took;
         var outcome = WaitForMod(before, throughSteam ? 120 : 60, !throughSteam, out took);
@@ -164,6 +202,7 @@ static partial class Program
         switch (outcome)
         {
             case Outcome.Loaded:
+                Progress(100);
                 Say("");
                 Say("Co-op mod loaded (" + took + " s). In the game: CONTINUE, get into the open world, then F2 (make a code) or F3 (type a code).");
                 Thread.Sleep(1500);

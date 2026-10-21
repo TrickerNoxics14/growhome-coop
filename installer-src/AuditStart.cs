@@ -86,10 +86,10 @@ static partial class Program
 
     static void AuditBorrower()
     {
-        string acf = "\"AppState\"\n{\n\t\"appid\"\t\t\"323320\"\n\t\"LastOwner\"\t\t\"76561199507864570\"\n}\n";
-        Check("BORROWER-DETECT", !IsBorrower(acf, "1547598842"), "the owner's own account is not a borrower", "");
-        Check("BORROWER-DETECT", IsBorrower(acf, "1928633237"), "another account on the same Steam library is recognised as a borrower", "");
-        Check("BORROWER-DETECT", !IsBorrower(null, "1547598842") && !IsBorrower("no owner in here", "1547598842") && !IsBorrower(acf, null) && !IsBorrower(acf, "abc"), "missing or odd information is treated as not-a-borrower (start directly first)", "");
+        string acf = "\"AppState\"\n{\n\t\"appid\"\t\t\"323320\"\n\t\"LastOwner\"\t\t\"76561198000000001\"\n}\n";
+        Check("BORROWER-DETECT", !IsBorrower(acf, "39734273"), "the owner's own account is not a borrower", "");
+        Check("BORROWER-DETECT", IsBorrower(acf, "39734274"), "another account on the same Steam library is recognised as a borrower", "");
+        Check("BORROWER-DETECT", !IsBorrower(null, "39734273") && !IsBorrower("no owner in here", "39734273") && !IsBorrower(acf, null) && !IsBorrower(acf, "abc"), "missing or odd information is treated as not-a-borrower (start directly first)", "");
         string live = ManifestText();
         Check("BORROWER-DETECT", live != null && LastOwner(live) != null, "this PC's Grow Home install manifest can be read", live == null ? "not found" : "LastOwner " + LastOwner(live));
     }

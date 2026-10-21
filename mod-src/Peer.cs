@@ -35,7 +35,8 @@ namespace CoopMod
         public float GapMax, GapSum, RttSum, RttMax;
         public int GapN, RttN;
 
-        public string Label { get { return IsBot ? "Bot " + BotIndex + " (" + ((SceneProfile.CharacterSkin)BotSkin) + ")" : "Player " + Number; } }
+        public string Name;                      // the Steam name, cleaned (see PlayerNames); empty until Steam has told us
+        public string Label { get { return IsBot ? "Bot " + BotIndex + " (" + ((SceneProfile.CharacterSkin)BotSkin) + ")" : (string.IsNullOrEmpty(Name) ? "Player " + Number : Name); } }
 
         public void ClearClone() { Clone = null; Driver = null; CloneTsMap.Clear(); CloneRsMap.Clear(); VisLogged = false; LastAppliedSkin = -1; }
     }

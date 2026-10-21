@@ -282,6 +282,145 @@ namespace CoopMod
             }
         }
 
+
+        // Everything another player's PC can send is checked: pose packets, visibility messages, and the log cannot be flooded.
+        void CheckNetSanity()
+        {
+            var good = new PlayerState { seq = 5, pos = new Vector3(10, 4, -20), vel = new Vector3(1, 0, 2), camForward = Vector3.forward, move = new Vector2(0.5f, 1f), skin = 3, jumpScale = 0.5f };
+            byte[] ok = good.Write();
+            var back = PlayerState.Read(ok);
+            Check("NET-SANITY", "a normal pose packet is read back exactly", back != null && back.seq == 5 && (back.pos - good.pos).magnitude < 0.001f && back.skin == 3, "");
+            Func<Action<PlayerState>, byte[]> make = tweak => { var s = new PlayerState { seq = 6, pos = good.pos, vel = good.vel, camForward = good.camForward, move = good.move, jumpScale = 0.1f }; tweak(s); return s.Write(); };
+            var hostile = new Dictionary<string, byte[]>();
+            hostile["NaN position"] = make(s => s.pos = new Vector3(float.NaN, 0, 0));
+            hostile["infinite position"] = make(s => s.pos = new Vector3(0, float.PositiveInfinity, 0));
+            hostile["position a million metres away"] = make(s => s.pos = new Vector3(1e6f, 0, 0));
+            hostile["NaN speed"] = make(s => s.vel = new Vector3(0, float.NaN, 0));
+            hostile["speed of 100000 m/s"] = make(s => s.vel = new Vector3(100000f, 0, 0));
+            hostile["NaN camera"] = make(s => s.camForward = new Vector3(float.NaN, 0, 0));
+            hostile["NaN stick"] = make(s => s.move = new Vector2(float.NaN, 0));
+            hostile["huge jump strength"] = make(s => s.jumpScale = 1e9f);
+            hostile["held object at NaN"] = make(s => s.held = new[] { new PlayerState.Held { id = 1, pos = new Vector3(float.NaN, 0, 0), rot = Quaternion.identity } });
+            bool allRefused = true; string leaked = "";
+            foreach (var kv in hostile) { if (PlayerState.Read(kv.Value) != null) { allRefused = false; leaked += kv.Key + "; "; } }
+            Check("NET-SANITY", "pose packets with impossible numbers are thrown away", allRefused, leaked.Length == 0 ? hostile.Count + " kinds tried" : "accepted: " + leaked);
+
+            int escaped = 0, accepted = 0; var rnd = new System.Random(4242);
+            for (int cut = 0; cut < ok.Length; cut++) { var c = new byte[cut]; Buffer.BlockCopy(ok, 0, c, 0, cut); try { if (PlayerState.Read(c) != null) accepted++; } catch (Exception) { escaped++; } }
+            for (int t = 0; t < 2000; t++) { var junk = new byte[rnd.Next(0, 400)]; rnd.NextBytes(junk); if (junk.Length > 0 && t % 2 == 0) junk[0] = 0xC0; try { var s = PlayerState.Read(junk); if (s != null && !(Math.Abs(s.pos.x) <= 50000f && Math.Abs(s.vel.x) <= 400f)) escaped++; } catch (Exception) { escaped++; } }
+            Check("NET-SANITY", "cut-off and random pose packets never throw and never give an impossible position", escaped == 0 && accepted == 0, escaped + " problems; " + accepted + " cut-off packets accepted");
+            bool bigRefused = false; try { bigRefused = PlayerState.Read(new byte[100000]) == null && PlayerState.Read(null) == null; } catch (Exception) { }
+            Check("NET-SANITY", "an oversized or missing pose packet is refused", bigRefused, "");
+
+            // visibility messages
+            var ms = new MemoryStream(); var w = new BinaryWriter(ms); w.Write(MessageGate.MsgVisibility); w.Write((ushort)3); for (int i = 0; i < 3; i++) { w.Write(i * 11); w.Write(i % 2 == 0); }
+            var vis = CoopBehaviour.ParseVisibility(ms.ToArray());
+            Check("NET-SANITY", "a normal visibility message is read", vis != null && vis.Count == 3 && vis[0] && !vis[11], vis == null ? "null" : vis.Count + " entries");
+            var liar = new MemoryStream(); var lw = new BinaryWriter(liar); lw.Write(MessageGate.MsgVisibility); lw.Write((ushort)60000); lw.Write(1); lw.Write(true);
+            var huge = new MemoryStream(); var hw = new BinaryWriter(huge); hw.Write(MessageGate.MsgVisibility); hw.Write((ushort)4001); hw.Write(new byte[4001 * 5]);
+            int visBad = 0; var junkVis = new List<byte[]> { liar.ToArray(), huge.ToArray(), new byte[0], new byte[] { 3 }, new byte[] { 3, 0 }, new byte[50000] };
+            foreach (var j in junkVis) { try { if (CoopBehaviour.ParseVisibility(j) != null) visBad++; } catch (Exception) { visBad += 100; } }
+            for (int t = 0; t < 1000; t++) { var junk = new byte[rnd.Next(0, 200)]; rnd.NextBytes(junk); if (junk.Length > 0) junk[0] = 3; try { CoopBehaviour.ParseVisibility(junk); } catch (Exception) { visBad += 100; } }
+            Check("NET-SANITY", "visibility messages with a lying count, too short or too big are refused without throwing", visBad == 0, visBad + " problems");
+
+            // the log cannot be flooded
+            string log = Path.Combine(Directory.GetParent(Application.dataPath).FullName, "coopmod-steam.log");
+            long before = File.Exists(log) ? new FileInfo(log).Length : 0;
+            for (int i = 0; i < 5000; i++) CoopBehaviour.Log("selftest: flood probe " + i);
+            long grew = (File.Exists(log) ? new FileInfo(log).Length : 0) - before;
+            Check("NET-SANITY", "a flood of messages cannot flood the log (at most 300 lines a second)", grew < 300L * 80, (grew / 1024) + " KB written for 5000 attempts");
+        }
+
+
+        // Players are shown by their Steam names, cleaned so that nothing odd can reach the screen.
+        void CheckNames()
+        {
+            Check("PLAYER-NAMES", "a normal name stays as it is", PlayerNames.Clean("TrickerSonic14", "Player 1") == "TrickerSonic14", "");
+            Check("PLAYER-NAMES", "emoji and other alphabets (the game's font cannot draw them) are dropped", PlayerNames.Clean("Ana \u2764 \u0645\u062D\u0645\u062F Lee", "Player 1") == "Ana Lee", PlayerNames.Clean("Ana \u2764 \u0645\u062D\u0645\u062F Lee", "Player 1"));
+            Check("PLAYER-NAMES", "a name with nothing drawable falls back to Player N", PlayerNames.Clean("\u0645\u062D\u0645\u062F", "Player 4") == "Player 4" && PlayerNames.Clean("   ", "Player 2") == "Player 2" && PlayerNames.Clean("", "Player 2") == "Player 2" && PlayerNames.Clean(null, "Player 2") == "Player 2" && PlayerNames.Clean("[unknown]", "Player 5") == "Player 5", "");
+            string markup = PlayerNames.Clean("<color=red>EVIL</color>\n|x", "Player 1");
+            Check("PLAYER-NAMES", "markup and control characters cannot get through", !markup.Contains("<") && !markup.Contains(">") && !markup.Contains("\\") && !markup.Contains("|") && PlayerNames.Clean("a\nb\tc\u0000d\u202Eevil", "P") == "ab cdevil", markup);
+            string longName = PlayerNames.Clean(new string('W', 200), "Player 1");
+            Check("PLAYER-NAMES", "a very long name is cut to 16 letters", longName.Length == PlayerNames.MaxLength, longName.Length + " letters");
+            Check("PLAYER-NAMES", "extra spaces are squeezed out", PlayerNames.Clean("  Big    Bird  ", "P") == "Big Bird", "");
+            var dup = new[] { "Sam", "Max", "sam", "Sam", "Sam 2" };
+            PlayerNames.MakeUnique(dup);
+            bool distinct = new HashSet<string>(dup, StringComparer.OrdinalIgnoreCase).Count == dup.Length;
+            Check("PLAYER-NAMES", "two players with the same name are told apart, the first one keeps its name", distinct && dup[0] == "Sam" && dup[1] == "Max", string.Join(" / ", dup));
+            var longDup = new[] { new string('A', 16), new string('A', 16) };
+            PlayerNames.MakeUnique(longDup);
+            Check("PLAYER-NAMES", "numbering a duplicate never makes the name longer than 16", longDup[1].Length <= PlayerNames.MaxLength && longDup[0] != longDup[1], longDup[1]);
+            var named = new Peer { Id = 1, Number = 2, Name = "Ana" }; var unnamed = new Peer { Id = 2, Number = 3 };
+            Check("PLAYER-NAMES", "a player is labelled with their name, or Player N until Steam has told us", named.Label == "Ana" && unnamed.Label == "Player 3", named.Label + " / " + unnamed.Label);
+        }
+
+        // With Steam running, my own name must come through the real code and be shown.
+        void CheckNamesLive()
+        {
+            var cb = UnityEngine.Object.FindObjectOfType(typeof(CoopBehaviour)) as CoopBehaviour;
+            if (cb == null) { Check("PLAYER-NAMES", "the mod is running", false, ""); return; }
+            cb.RefreshNamesNow();
+            string steamName = Steamworks.SteamFriends.GetPersonaName();
+            string expected = PlayerNames.Clean(steamName, "");
+            Check("PLAYER-NAMES", "my own Steam name is read and shown", !string.IsNullOrEmpty(cb.MyDisplayName) && (expected.Length == 0 || cb.MyDisplayName == expected), "steam \"" + steamName + "\" -> shown \"" + cb.MyDisplayName + "\"");
+        }
+
+
+        // In-game chat: what can be said, what arrives, who it is shown as, and that nobody can flood or spoof it.
+        void CheckChat()
+        {
+            Check("CHAT", "a normal message is cleaned to itself", Chat.Clean("hello there!") == "hello there!", "");
+            string nasty = Chat.Clean("<color=red>hi</color> \n \u2764 \u0645\u062D\u0645\u062F  ok\u0000\t\t!");
+            Check("CHAT", "markup, emoji, other alphabets and control characters are removed", !nasty.Contains("<") && !nasty.Contains(">") && !nasty.Contains("\\") && nasty == "color=redhi/color ok !", nasty);
+            Check("CHAT", "a long message is cut to 100 characters", Chat.Clean(new string('x', 1000)).Length == Chat.MaxText, "");
+            Check("CHAT", "an empty or unprintable message becomes nothing", Chat.Clean("") == "" && Chat.Clean(null) == "" && Chat.Clean("\u2764\u2764") == "", "");
+
+            byte[] enc = Chat.Encode("see you on the island");
+            string back;
+            Check("CHAT", "a message survives sending", Chat.TryDecode(enc, out back) && back == "see you on the island" && enc[0] == Chat.Msg, back);
+            var bad = new List<byte[]>();
+            bad.Add(null); bad.Add(new byte[0]); bad.Add(new byte[] { Chat.Msg }); bad.Add(new byte[] { Chat.Msg, 0 });
+            bad.Add(new byte[] { Chat.Msg, 5, 65, 66 });                        // says 5 letters, has 2
+            bad.Add(new byte[] { Chat.Msg, 2, 65, 66, 67 });                    // says 2 letters, has 3
+            bad.Add(new byte[] { 9, 2, 65, 66 });                                // not a chat message
+            var tooLong = new byte[2 + 101]; tooLong[0] = Chat.Msg; tooLong[1] = 101; bad.Add(tooLong);
+            var big = new byte[100000]; big[0] = Chat.Msg; big[1] = 255; bad.Add(big);
+            bad.Add(new byte[] { Chat.Msg, 3, 0, 1, 2 });                        // only control characters
+            int accepted = 0; var rnd = new System.Random(99);
+            foreach (var b in bad) { string t; try { if (Chat.TryDecode(b, out t)) accepted++; } catch (Exception) { accepted += 100; } }
+            for (int i = 0; i < 3000; i++) { var junk = new byte[rnd.Next(0, 160)]; rnd.NextBytes(junk); if (junk.Length > 0) junk[0] = Chat.Msg; string t; try { if (Chat.TryDecode(junk, out t) && (t.Length > Chat.MaxText || t.Contains("<"))) accepted += 100; } catch (Exception) { accepted += 100; } }
+            Check("CHAT", "damaged, lying, too long and random chat messages are refused without throwing", accepted == 0, accepted + " problems");
+
+            // the same player cannot flood the chat
+            bool five = true; for (int i = 0; i < 5; i++) five &= Chat.Allow(111UL, 100f + i * 0.1f);
+            bool sixthRefused = !Chat.Allow(111UL, 100.6f);
+            bool otherPlayerFine = Chat.Allow(222UL, 100.6f);
+            bool laterFine = Chat.Allow(111UL, 108f);
+            Check("CHAT", "one player is limited to 5 messages in 6 seconds, others are not affected, and it recovers", five && sixthRefused && otherPlayerFine && laterFine, "five=" + five + " sixth refused=" + sixthRefused + " other=" + otherPlayerFine + " later=" + laterFine);
+
+            Check("CHAT", "the network gate sends chat messages to the chat, and refuses oversized ones", MessageGate.Classify(enc, false) == Route.Chat && MessageGate.Classify(big, true) == Route.Oversized, MessageGate.Classify(enc, false).ToString());
+        }
+
+        // The real mod: a message from a player's connection is shown under that connection's name; mine is sent and shown.
+        void CheckChatLive()
+        {
+            var cb = UnityEngine.Object.FindObjectOfType(typeof(CoopBehaviour)) as CoopBehaviour;
+            if (cb == null) { Check("CHAT", "the mod is running", false, ""); return; }
+            int before = Chat.Lines.Count;
+            bool shown = cb.HandleChat(333UL, "Ana", Chat.Encode("hello from Ana"));
+            var last = Chat.Lines.Count > before ? Chat.Lines[Chat.Lines.Count - 1] : null;
+            Check("CHAT", "a friend's message is shown under the name of their connection", shown && last != null && last.Name == "Ana" && last.Text == "hello from Ana" && !last.Mine, last == null ? "nothing shown" : last.Name + ": " + last.Text);
+            int flooded = 0; for (int i = 0; i < 20; i++) if (cb.HandleChat(444UL, "Spammer", Chat.Encode("buy now " + i))) flooded++;
+            Check("CHAT", "a flood from one player shows only the first few messages", flooded == 5, flooded + " of 20 shown");
+            before = Chat.Lines.Count; sink.Messages.Clear();
+            cb.SendChat("hi everybody");
+            cb.SendChat("   ");
+            cb.SendChat("\u2764");
+            string sent = null; foreach (var m in sink.Messages) if (m.Length > 0 && m[0] == Chat.Msg) { string t; if (Chat.TryDecode(m, out t)) sent = t; }
+            var mine = Chat.Lines.Count > before ? Chat.Lines[Chat.Lines.Count - 1] : null;
+            Check("CHAT", "my message is sent once and shown as mine; empty ones are not sent", sent == "hi everybody" && CountType(Chat.Msg) == 1 && mine != null && mine.Mine && Chat.Lines.Count == before + 1, "sent=\"" + sent + "\" messages=" + CountType(Chat.Msg) + " lines +" + (Chat.Lines.Count - before));
+        }
+
         void CheckGate()
         {
             var big = new byte[MessageGate.MaxMessage + 1];
@@ -345,6 +484,9 @@ namespace CoopMod
             try { CheckCompressor(); } catch (Exception e) { Check("AUDIT-ERROR", "compressor checks ran", false, Describe(e)); }
             try { CheckGate(); } catch (Exception e) { Check("AUDIT-ERROR", "gate checks ran", false, Describe(e)); }
             try { CheckUpdateNotice(); } catch (Exception e) { Check("AUDIT-ERROR", "update notice checks ran", false, Describe(e)); }
+            try { CheckNetSanity(); } catch (Exception e) { Check("AUDIT-ERROR", "network sanity checks ran", false, Describe(e)); }
+            try { CheckNames(); } catch (Exception e) { Check("AUDIT-ERROR", "name checks ran", false, Describe(e)); }
+            try { CheckChat(); } catch (Exception e) { Check("AUDIT-ERROR", "chat checks ran", false, Describe(e)); }
 
             float begin = Time.realtimeSinceStartup;
             bool pressed = false; float menuAt = -1f;
@@ -374,6 +516,8 @@ namespace CoopMod
             if (SharedWorld.MyId == 0UL) SharedWorld.MyId = 1UL;
             SharedWorld.TestSink = sink;
             try { CheckSavePaths(); } catch (Exception e) { Check("AUDIT-ERROR", "save path checks ran", false, Describe(e)); }
+            try { CheckNamesLive(); } catch (Exception e) { Check("AUDIT-ERROR", "live name check ran", false, Describe(e)); }
+            try { CheckChatLive(); } catch (Exception e) { Check("AUDIT-ERROR", "live chat check ran", false, Describe(e)); }
 
             var roots = new List<PlantRoot>();
             foreach (PlantRoot r in UnityEngine.Object.FindObjectsOfType(typeof(PlantRoot))) if (SharedWorld.PlantId(r) != null) roots.Add(r);
@@ -617,6 +761,12 @@ namespace CoopMod
                 if (Time.time - stillSince > 4f) break;
                 yield return new WaitForSeconds(0.5f);
             }
+            // a plant can grow a branch by itself at any moment, which would look like a message changing it: switch growth off while comparing
+            var frozen = new List<Behaviour>();
+            foreach (PlantBranch b in UnityEngine.Object.FindObjectsOfType(typeof(PlantBranch))) if (b.enabled) { b.enabled = false; frozen.Add(b); }
+            foreach (PlantRoot pr in UnityEngine.Object.FindObjectsOfType(typeof(PlantRoot))) if (pr.enabled) { pr.enabled = false; frozen.Add(pr); }
+            yield return null;
+            foreach (var r in roots) if (r != null) sigs[r] = SharedWorld.PlantSignature(r);
             var rnd = new System.Random(777);
             var plain = new List<byte[]>();      // must not change anything
             var twisted = new List<byte[]>();    // may be accepted if they happen to parse; only checked for not escaping / not being slow
@@ -673,6 +823,7 @@ namespace CoopMod
                 if (i % 40 == 39) yield return null;
             }
             SharedWorld.QuietRejects = false;
+            foreach (var f in frozen) if (f != null) f.enabled = true;
             Check("MSG-FUZZ", "no broken message escapes the handler", escaped == 0, count + " messages, " + escaped + " escaped");
             Check("MSG-FUZZ", "no broken message is slow", slow == 0, "slowest " + worst + " ms (limit 250 ms), " + slow + " slow");
             Check("MSG-FUZZ", "broken messages are really rejected", SharedWorld.StatRejected - rejectedBefore >= mustReject, (SharedWorld.StatRejected - rejectedBefore) + " rejected, at least " + mustReject + " were certain to be");

@@ -228,6 +228,53 @@ namespace CoopMod
             return t;
         }
 
+        // ---- chat ------------------------------------------------------------------------------------------------------------------------
+
+        // The last few messages bottom-left; they fade out after a while unless the chat box is open.
+        public static void ChatLog(List<Chat.Line> lines, float now, bool open)
+        {
+            Build();
+            const float life = 14f;
+            float lh = 26f * S, x = 20f * S, y = Screen.height - (open ? 168f : 118f) * S;
+            int shown = 0;
+            for (int i = lines.Count - 1; i >= 0 && shown < 7; i--)
+            {
+                var l = lines[i];
+                float a = open ? 1f : Mathf.Clamp01((life - (now - l.At)) / 1.5f);
+                if (a <= 0f) continue;
+                string who = l.Name.ToUpperInvariant() + ": ";
+                float nw = Width(who, 16);
+                Color nameColor = l.Mine ? Cyan : Pink;
+                Text(new Rect(x, y, nw + 4f * S, lh), who, new Color(nameColor.r, nameColor.g, nameColor.b, a), 16, TextAnchor.MiddleLeft);
+                Text(new Rect(x + nw, y, 900f * S, lh), l.Text, new Color(White.r, White.g, White.b, a), 16, TextAnchor.MiddleLeft);
+                y -= lh; shown++;
+            }
+        }
+
+        // The box you type into (T opens it, Enter sends, Esc closes).
+        public static string ChatBox(string textIn, out bool send, out bool cancel)
+        {
+            Build();
+            send = cancel = false;
+            float w = 640f * S, h = 42f * S;
+            var r = new Rect(20f * S, Screen.height - 112f * S, w, h);
+            Fill(r, new Color(0f, 0.03f, 0.09f, 0.9f));
+            Fill(new Rect(r.x, r.yMax - 2f * S, r.width, 2f * S), Pink);
+            Text(new Rect(r.x + 10f * S, r.y, 70f * S, h), "SAY>", Pink, 16, TextAnchor.MiddleLeft);
+            var fr = new Rect(r.x + 80f * S, r.y + 4f * S, w - 90f * S, h - 8f * S);
+            GUI.SetNextControlName("chatbox");
+            field.fontSize = Mathf.RoundToInt(18 * S);
+            string t = GUI.TextField(fr, textIn, Chat.MaxText, field);
+            GUI.FocusControl("chatbox");
+            var ev = Event.current;
+            if (ev.type == EventType.KeyDown)
+            {
+                if (ev.keyCode == KeyCode.Return || ev.keyCode == KeyCode.KeypadEnter) send = true;
+                if (ev.keyCode == KeyCode.Escape) cancel = true;
+            }
+            return t;
+        }
+
         // Menu-style button: plain cyan text; when hovered the game's pink ">>>" appears in front, like "Resume" in the pause menu.
         static bool Button(Rect r, string label)
         {

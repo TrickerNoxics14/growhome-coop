@@ -38,3 +38,11 @@ STEAM-LAUNCH-OPTION   | exe    | Steam's launch option that makes Play start the
 INSTALL-FAST          | exe    | the install links the big data files instead of copying (seconds, no extra disk), never links what the game or patcher writes, deleting the copy never touches the original
 UPDATE-BACKGROUND     | exe    | on a very slow network the short check gives up harmlessly, the background check is patient, coop-noupdate.txt switches checking off completely, and the game is told about a downloaded update
 UPDATE-NOTICE         | game   | the game shows "mod update downloaded, restart to use it" once, and ignores damaged notes
+GUI-FONT              | exe    | the window uses the game's own menu font, read from the player's own Grow Home (nothing copied into the download), and falls back safely
+GUI-RENDER            | exe    | every page of the window is drawn like the game's menus: blue sky, pink selection, framed status panel, red progress boxes, text visible
+GUI-LAYOUT            | exe    | nothing runs out of its place: menu lines fit their column, long paths wrap inside the panel without losing text, any window size draws
+GUI-INPUT             | exe    | keyboard and mouse work like the game's menus; a question from the worker thread is answered from the window; settings switch both ways
+UPDATE-SIGNED         | exe    | only the author can update the mod: an update must carry a valid signature (not missing, not from another key, not reusable for another file, address or version), come from GitHub over https, not be redirected elsewhere and not be oversized
+NET-SANITY            | game   | everything another player's PC sends is checked: pose packets with impossible numbers or cut off, bad visibility messages and log floods are refused without throwing
+PLAYER-NAMES          | game   | players are shown by their Steam names (own name read from Steam), cleaned: nothing the game's font cannot draw, no markup, at most 16 letters, duplicates told apart, Player N until Steam has told us
+CHAT                  | game   | in-game chat: messages are cleaned (plain text, 100 characters), shown under the sender's real connection name (nobody can speak as someone else), limited to 5 per 6 seconds per player, damaged ones refused, and mine is sent once

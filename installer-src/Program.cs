@@ -18,73 +18,84 @@ static partial class Program
 {
     const string ExpectedAssemblySha = "8d99d51663061da95016e496116191850b6a5437250cfc38bb8576027b2aa40d";   // Grow Home Steam build 857617
     static string ManifestUrl = "https://raw.githubusercontent.com/TrickerNoxics14/growhome-coop/main/version.json";
-    const int BundledVersion = 2;                                   // version of the CoopMod.dll embedded in this exe
+    const int BundledVersion = 3;                                   // version of the CoopMod.dll embedded in this exe
 
     static string installDir, gameDir;
     static bool noPrompt, auditMode;
     static string useGame, auditOut;
     static readonly List<string> extraVdf = new List<string>();
 
+    static string cliSkin, cliGameOverride;
+    static bool cliNoUpdate, cliReinstall, consoleMode, autoPlay;
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")] static extern bool AttachConsole(int pid);
+
     static int Main(string[] args)
     {
         AppDomain.CurrentDomain.AssemblyResolve += ResolveEmbedded;
         try { ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072; } catch { }
-        Console.Title = "Grow Home Co-op";
 
-        string skin = null, gameOverride = null;
-        bool noUpdate = false, reinstall = false;
         installDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "GrowHomeCoop");
         for (int i = 0; i < args.Length; i++)
         {
             switch (args[i])
             {
-                case "--no-update": noUpdate = true; break;
-                case "--reinstall": reinstall = true; break;
+                case "--no-update": cliNoUpdate = true; break;
+                case "--reinstall": cliReinstall = true; break;
                 case "--no-prompt": noPrompt = true; break;
                 case "--install-dir": installDir = args[++i]; break;
-                case "--game-dir": gameOverride = args[++i]; break;
-                case "--skin": skin = args[++i]; break;
+                case "--game-dir": cliGameOverride = args[++i]; break;
+                case "--skin": cliSkin = args[++i]; break;
                 case "--via-steam": forceSteam = true; break;    // always start through Steam (the launcher picks this by itself for accounts that only borrow the game)
                 case "--direct": forceDirect = true; break;      // never start through Steam
-                case "--yes": assumeYes = true; break;           // answer every question with yes and do not wait for a key at the end
+                case "--yes": assumeYes = true; break;           // answer every question with yes and do not wait for a key at the end (text mode)
+                case "--console": consoleMode = true; break;     // text window instead of the game-styled window
+                case "--auto-play": autoPlay = true; break;      // the window starts the game by itself
                 case "--game-args": gameArgs = args[++i]; break; // arguments for the game window (default: 1280x720 borderless)
                 case "--setup-steam": setupSteam = true; break;  // make Steam's Play button start the co-op copy
                 case "--undo-steam-setup": undoSteam = true; break;   // put Steam's launch option back to what it was
                 case "--use-game": useGame = args[++i]; break;   // use an existing patched copy at this path
-                case "--audit": auditMode = true; break;         // run the self-checks of the updater and patcher (see audit/run-audit.ps1), then stop
+                case "--audit": auditMode = true; break;         // run the self-checks of the updater, patcher and window (see audit/run-audit.ps1), then stop
                 case "--audit-out": auditOut = args[++i]; break;
                 case "--audit-vdf": extraVdf.Add(args[++i]); break;   // also check this Steam settings file (e.g. a copy from another PC)
             }
         }
         gameDir = Path.Combine(installDir, "game");
         if (useGame != null) { gameDir = useGame; installDir = Path.GetDirectoryName(Path.GetFullPath(useGame)); }
-        if (auditMode) return Audit();
 
+        bool window = !consoleMode && !assumeYes && !noPrompt && !auditMode && !setupSteam && !undoSteam;
+        if (!window) { AttachConsole(-1); try { Console.Title = "Grow Home Co-op"; } catch { } }     // text modes print into the console they were started from
+        if (auditMode) return Audit();
+        if (window) return GuiMain();
+
+        int code = RunFlow();
+        if (code != 0 && !assumeYes) { Console.WriteLine(); Console.WriteLine("Press Enter to close."); Console.ReadLine(); }
+        Environment.Exit(code);
+        return code;
+    }
+
+    // The whole job: install when needed, then start the game. The console and the window both run this; the window gives Say/Confirm/Progress its own hooks.
+    static int RunFlow()
+    {
         try
         {
             bool installed = File.Exists(Path.Combine(gameDir, "GrowHome.exe")) && File.Exists(Path.Combine(gameDir, "GrowHome_Data", "Managed", "CoopMod.dll"));
-            if (!installed || reinstall)
+            if (!installed || cliReinstall)
             {
-                Install(gameOverride, skin);
+                Install(cliGameOverride, cliSkin);
                 if (noPrompt) return 0;
             }
-            if (noPrompt) { if (!noUpdate) CheckForUpdate(true); return 0; }   // tests: update right away and stop
+            if (noPrompt) { if (!cliNoUpdate) CheckForUpdate(true); return 0; }   // tests: update right away and stop
             if (undoSteam) { EnsureSteamLoggedIn(90); return EnsureLaunchOption(true) ? 0 : 1; }
             if (setupSteam) { EnsureSteamLoggedIn(90); return EnsureLaunchOption(false) ? 0 : 1; }
-            int code = Start(noUpdate);
-            if (code != 0 && !assumeYes) { Console.WriteLine(); Console.WriteLine("Press Enter to close."); Console.ReadLine(); }
-            Environment.Exit(code);
-            return code;
+            return Start(cliNoUpdate);
         }
         catch (Exception e)
         {
-            Console.ForegroundColor = ConsoleColor.Red;
-            Console.WriteLine();
-            Console.WriteLine("Something went wrong: " + e.Message);
-            Console.ResetColor();
-            Console.WriteLine();
-            Console.WriteLine("If you ask for help, send the text above.");
-            if (!noPrompt && !assumeYes) { Console.WriteLine("Press Enter to close."); Console.ReadLine(); }
+            Say("");
+            Say("Something went wrong: " + e.Message);
+            Say("If you ask for help, send launcher.log from the GrowHomeCoop folder.");
+            Log("failed: " + e);
             return 1;
         }
     }
@@ -161,10 +172,10 @@ static partial class Program
 
     static void Install(string gameOverride, string skin)
     {
-        Console.WriteLine("=== Grow Home Co-op installer ===");
+        Say("Installing Grow Home Co-op");
         string src = gameOverride ?? FindGame();
         if (src == null) throw new Exception("Could not find Grow Home. Install it on Steam first, then run this again.");
-        Console.WriteLine("Found Grow Home: " + src + "  (only read, never changed)");
+        Say("Found Grow Home: " + src + "  (only read, never changed)");
 
         string asm = Path.Combine(src, "GrowHome_Data", "Managed", "Assembly-CSharp.dll");
         string sha = Sha256(asm);
@@ -179,15 +190,11 @@ static partial class Program
 
         if (Directory.Exists(gameDir))
         {
-            if (!noPrompt && !assumeYes)
-            {
-                Console.Write("An earlier install exists. Replace it? Your co-op save in it will be lost. Type YES to replace: ");
-                if (Console.ReadLine() != "YES") throw new Exception("Cancelled.");
-            }
+            if (!noPrompt && !assumeYes && !ConfirmStrict("An earlier install exists. Replace it? Your co-op save in it will be lost.")) throw new Exception("Cancelled.");
             DeleteGameCopy(gameDir);
         }
         Directory.CreateDirectory(installDir);
-        Console.WriteLine(sameDrive ? "Setting up the co-op copy in " + gameDir + " (most files are linked, not copied: this takes seconds)..." : "Copying the game to " + gameDir + " (about 850 MB, this takes a minute)...");
+        Say(sameDrive ? "Setting up the co-op copy in " + gameDir + " (most files are linked, not copied: this takes seconds)..." : "Copying the game to " + gameDir + " (about 850 MB, this takes a minute)...");
         CopyGame(src, gameDir, sameDrive);
 
         string managed = Path.Combine(gameDir, "GrowHome_Data", "Managed");
@@ -199,23 +206,16 @@ static partial class Program
         string me = MySteamId();
         if (me != null) File.WriteAllText(Path.Combine(installDir, "MY-STEAM-ID.txt"), me);
 
-        if (skin == null && !noPrompt)
-        {
-            Console.WriteLine();
-            Console.Write("Which BUD colour do you want? 1 = red (default), 2 = blue: ");
-            skin = Console.ReadLine() == "2" ? "blue" : "red";
-        }
+        if (skin == null && !noPrompt) skin = Choose("Which BUD colour do you want?", "Red", "Blue") == 1 ? "blue" : "red";
         if (skin != null) File.WriteAllText(Path.Combine(gameDir, "coop-skin.txt"), skin.ToLower() == "blue" ? "Oceanic" : "Standard");
 
         string self = Assembly.GetExecutingAssembly().Location, keep = Path.Combine(installDir, "GrowHomeCoop.exe");
         if (!string.Equals(Path.GetFullPath(self), Path.GetFullPath(keep), StringComparison.OrdinalIgnoreCase)) File.Copy(self, keep, true);   // the shortcut points at this permanent copy
         if (!noPrompt) MakeShortcut();
-        Console.WriteLine();
-        Console.WriteLine("Installed. A \"Grow Home Co-op\" shortcut is on your desktop. Use it (or this exe) to play.");
-        Console.WriteLine();
-        Console.WriteLine("HOW TO PLAY TOGETHER: everyone starts the game, picks CONTINUE and gets into the open world.");
-        Console.WriteLine("ONE person presses F2 (a code appears), everyone else presses F3 and types the code.");
-        Console.WriteLine();
+        Say("");
+        Say("Installed. A \"Grow Home Co-op\" shortcut is on your desktop. Use it (or this exe) to play.");
+        Say("HOW TO PLAY TOGETHER: everyone starts the game, picks CONTINUE and gets into the open world.");
+        Say("ONE person presses F2 (a code appears), everyone else presses F3 and types the code.");
     }
 
     // The big read-only data files of the game are linked instead of copied when the co-op copy is on the same drive: the install takes seconds instead of
@@ -248,7 +248,7 @@ static partial class Program
         long total = Math.Max(1, TreeSize(from)), done = 0; int shown = -1;
         var clock = Stopwatch.StartNew();
         CopyTree(from, to, from, total, ref done, ref shown);
-        Console.WriteLine("\r  100%");
+        ShowInstallProgress(100);
         Log("installed in " + (int)clock.Elapsed.TotalSeconds + " s: " + linkedFiles + " files linked (" + linkedBytes / (1024 * 1024) + " MB), " + copiedFiles + " copied (" + copiedBytes / (1024 * 1024) + " MB)");
     }
 
@@ -268,7 +268,7 @@ static partial class Program
             if (linked) { linkedFiles++; linkedBytes += size; } else { File.Copy(f, dest, true); copiedFiles++; copiedBytes += size; }
             done += size;
             int pct = (int)(done * 100 / total);
-            if (pct / 5 != shown) { shown = pct / 5; Console.Write("\r  " + pct + "%  "); }
+            if (pct / 5 != shown) { shown = pct / 5; ShowInstallProgress(pct); }
         }
         foreach (var d in Directory.GetDirectories(from)) CopyTree(d, Path.Combine(to, Path.GetFileName(d)), root, total, ref done, ref shown);
     }
@@ -292,7 +292,7 @@ static partial class Program
         string orig = path + ".orig";
         if (!File.Exists(orig)) File.Copy(path, orig);
         PatchWithCecil(managedDir, path, orig);
-        Console.WriteLine("Patched the co-op copy.");
+        Say("Patched the co-op copy.");
     }
 
     // Reads the original assembly, adds the call, and writes the result to 'path' (the audit writes it somewhere else to keep the install untouched).
@@ -323,7 +323,7 @@ static partial class Program
             sc.Description = "Grow Home Co-op (modded copy)";
             sc.Save();
         }
-        catch (Exception e) { Console.WriteLine("(Could not make a desktop shortcut: " + e.Message + ")"); }
+        catch (Exception e) { Say("(Could not make a desktop shortcut: " + e.Message + ")"); }
     }
 
     // ---- update -------------------------------------------------------------------------------------------------------------------------
@@ -340,30 +340,35 @@ static partial class Program
         return m.Success ? (m.Groups[2].Success ? m.Groups[2].Value : m.Groups[3].Value) : null;
     }
 
+    // Downloads are small and only from the allowed hosts, also after any redirect.
     static string Get(string url, int timeoutMs)
     {
         var req = (HttpWebRequest)WebRequest.Create(url);
-        req.Timeout = timeoutMs; req.ReadWriteTimeout = timeoutMs; req.UserAgent = "GrowHomeCoop";
+        req.Timeout = timeoutMs; req.ReadWriteTimeout = timeoutMs; req.UserAgent = "GrowHomeCoop"; req.MaximumAutomaticRedirections = 3;
         req.Headers[HttpRequestHeader.CacheControl] = "no-cache";
         using (var resp = req.GetResponse())
-        using (var rd = new StreamReader(resp.GetResponseStream())) return rd.ReadToEnd();
+        {
+            if (!UrlAllowed(resp.ResponseUri.ToString())) throw new WebException("the answer came from a place that is not allowed");
+            using (var s = resp.GetResponseStream()) return Encoding.UTF8.GetString(ReadLimited(s, 64 * 1024));
+        }
     }
 
     static byte[] GetBytes(string url, int timeoutMs)
     {
         var req = (HttpWebRequest)WebRequest.Create(url);
-        req.Timeout = timeoutMs; req.ReadWriteTimeout = timeoutMs; req.UserAgent = "GrowHomeCoop";
+        req.Timeout = timeoutMs; req.ReadWriteTimeout = timeoutMs; req.UserAgent = "GrowHomeCoop"; req.MaximumAutomaticRedirections = 3;
         using (var resp = req.GetResponse())
-        using (var s = resp.GetResponseStream())
         {
-            var ms = new MemoryStream(); s.CopyTo(ms); return ms.ToArray();
+            if (!UrlAllowed(resp.ResponseUri.ToString())) throw new WebException("the download came from a place that is not allowed");
+            using (var s = resp.GetResponseStream()) return ReadLimited(s, 8 * 1024 * 1024);
         }
     }
 
-    // Updates only come over https. (The audit also allows its own throw-away server on this PC.)
-    static bool UrlAllowed(string url)
+    static byte[] ReadLimited(Stream s, int max)
     {
-        return url.StartsWith("https://") || (auditMode && url.StartsWith("http://127.0.0.1:"));
+        var ms = new MemoryStream(); var buf = new byte[16384]; int n;
+        while ((n = s.Read(buf, 0, buf.Length)) > 0) { ms.Write(buf, 0, n); if (ms.Length > max) throw new InvalidDataException("the answer is far bigger than expected"); }
+        return ms.ToArray();
     }
 
     static string StagedDll { get { return Path.Combine(gameDir, "GrowHome_Data", "Managed", "CoopMod.dll.new"); } }
@@ -389,7 +394,7 @@ static partial class Program
             if (version > InstalledVersion() && string.Equals(Sha256(data), sha, StringComparison.OrdinalIgnoreCase) && Process.GetProcessesByName("GrowHome").Length == 0)
             {
                 Swap(data, version);
-                Console.WriteLine("Co-op mod updated to version " + version + ".");
+                Say("Co-op mod updated to version " + version + ".");
                 Log("applied staged update " + version);
             }
             File.Delete(StagedDll); File.Delete(StagedInfo);
@@ -412,19 +417,20 @@ static partial class Program
             int latest = int.Parse(Field(json, "version") ?? "0");
             string url = Field(json, "dll"), sha = Field(json, "sha256"), notes = Field(json, "notes");
             int have = InstalledVersion();
-            if (latest <= have) { Console.WriteLine("Co-op mod is up to date (version " + have + ")."); Log("up to date " + have); return 0; }
+            if (latest <= have) { Say("Co-op mod is up to date (version " + have + ")."); Log("up to date " + have); return 0; }
             if (string.IsNullOrEmpty(url) || string.IsNullOrEmpty(sha) || !UrlAllowed(url)) { Log("update info looks wrong"); return 0; }
-            Console.WriteLine("New co-op mod version " + latest + (notes != null ? " (" + notes + ")" : "") + ": downloading...");
+            if (!VerifyManifest(latest, sha, url, Field(json, "signature"))) { Say("This update is not signed by the author; skipped for safety."); Log("update has no valid signature: refused"); return 0; }
+            Say("New co-op mod version " + latest + (notes != null ? " (" + notes + ")" : "") + ": downloading...");
             byte[] data = GetBytes(url, downloadMs);
-            if (!string.Equals(Sha256(data), sha, StringComparison.OrdinalIgnoreCase)) { Console.WriteLine("Downloaded file did not match its fingerprint; skipped for safety."); Log("update fingerprint mismatch"); return 0; }
-            if (applyNow && Process.GetProcessesByName("GrowHome").Length == 0) { Swap(data, latest); Console.WriteLine("Updated."); Log("updated to " + latest); return latest; }
+            if (!string.Equals(Sha256(data), sha, StringComparison.OrdinalIgnoreCase)) { Say("Downloaded file did not match its fingerprint; skipped for safety."); Log("update fingerprint mismatch"); return 0; }
+            if (applyNow && Process.GetProcessesByName("GrowHome").Length == 0) { Swap(data, latest); Say("Updated."); Log("updated to " + latest); return latest; }
             File.WriteAllBytes(StagedDll, data);
             File.WriteAllText(StagedInfo, latest + "\n" + sha);
-            Console.WriteLine("Update downloaded. It will be used the next time you start the game.");
+            Say("Update downloaded. It will be used the next time you start the game.");
             Log("staged update " + latest);
             return latest;
         }
-        catch (Exception e) { Console.WriteLine("(No update check this time: " + e.Message + ")"); Log("update check failed: " + e.Message); }
+        catch (Exception e) { Say("(No update check this time: " + e.Message + ")"); Log("update check failed: " + e.Message); }
         return 0;
     }
 

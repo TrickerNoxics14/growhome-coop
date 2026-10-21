@@ -1,6 +1,6 @@
 namespace CoopMod
 {
-    public enum Route { Ignore, Visibility, Shared, Oversized, SnapshotNotFromHost, World }
+    public enum Route { Ignore, Visibility, Shared, Chat, Oversized, SnapshotNotFromHost, World }
 
     // The one place that decides what a reliable message from another player is allowed to do.
     //  - plant / crystal / island events: anybody may send them
@@ -15,6 +15,7 @@ namespace CoopMod
         {
             if (m == null || m.Length == 0) return Route.Ignore;
             if (m[0] == MsgVisibility) return Route.Visibility;
+            if (m[0] == Chat.Msg) return m.Length > Chat.MaxBytes ? Route.Oversized : Route.Chat;
             if (SharedWorld.IsMessage(m)) return m.Length > MaxMessage ? Route.Oversized : Route.Shared;
             if (m.Length > MaxMessage) return Route.Oversized;
             if (WorldSync.IsSnapshot(m) && !senderIsHost) return Route.SnapshotNotFromHost;

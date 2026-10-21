@@ -34,7 +34,7 @@ namespace CoopMod
         SteamHub hub; UdpLanHub lanHub; BroadcastTransport broadcast;
         readonly List<Peer> peers = new List<Peer>();
         readonly List<string> peerSpecs = new List<string>();
-        ulong myId; int myNumber;
+        ulong myId; int myNumber; string myName;      // my own Steam name, cleaned
         float nextSteamTry, nextSend; uint sendSeq;
         bool pendJumpDown, pendJumpUp;
         Peer testPeer;                                  // F9 keyboard-driven test copy when there is no network
@@ -45,7 +45,21 @@ namespace CoopMod
 
         // Steam starts the game with its working directory set to the original install, so anchor files to the running exe's folder.
         static string Here(string file) { return Path.Combine(Directory.GetParent(Application.dataPath).FullName, file); }
-        public static void Log(string m) { File.AppendAllText(Here(logName), m + "\n"); }
+        // The log can never be used to fill the disk: at most 300 lines a second, and nothing more once the file is 12 MB.
+        static int logSecond, logCount, logChecks; static bool logFull;
+        public static void Log(string m)
+        {
+            try
+            {
+                int sec = Environment.TickCount / 1000;
+                if (sec != logSecond) { logSecond = sec; logCount = 0; }
+                if (++logCount > 300 || logFull) return;
+                string path = Here(logName);
+                if (++logChecks % 100 == 0 && File.Exists(path) && new FileInfo(path).Length > 12 * 1024 * 1024) { logFull = true; return; }
+                File.AppendAllText(path, m + "\n");
+            }
+            catch (Exception) { }
+        }
 
         float nextUpdateNote;
         // The launcher leaves this file when it has downloaded a newer mod in the background. Returns the message to show (and removes the file), or null.
@@ -158,6 +172,7 @@ namespace CoopMod
             if (Online && Input.GetKeyDown(KeyCode.F10)) AddBot();
             if (Online && Input.GetKeyDown(KeyCode.F11)) RemoveBot();
             if (Online && Input.GetKeyDown(KeyCode.F3)) OpenJoinBox();
+            if (Online && !chatOpen && !joinOpen && Input.GetKeyDown(KeyCode.T) && WorldSync.InWorld()) OpenChat();
             if (!Online && Time.time >= nextSteamTry) TryStartSteam();
             if (Online) NetTick();
             if (Time.realtimeSinceStartup >= nextUpdateNote) { nextUpdateNote = Time.realtimeSinceStartup + 10f; string note = TakeUpdateNotice(Here("coop-update-ready.txt")); if (note != null) { CoopUI.Toast(note); Log("update notice shown: " + note); } }
@@ -342,9 +357,72 @@ namespace CoopMod
 
         // ---- per frame ------------------------------------------------------------------------------------------------------------------
 
+        // ---- chat ----------------------------------------------------------------------------------------------------------------------
+
+        bool chatOpen; string chatText = ""; int chatOpenFrame;
+
+        void OpenChat() { chatOpen = true; chatText = ""; chatOpenFrame = Time.frameCount; InputManager.Push(this, "ui"); }
+        void CloseChat() { if (chatOpen) { chatOpen = false; InputManager.Pop(this); } }
+
+        // Says something to everybody (and shows it to me). Empty or all-unprintable text is not sent.
+        public void SendChat(string text)
+        {
+            string t = Chat.Clean(text);
+            if (t.Length == 0) return;
+            byte[] m = Chat.Encode(t);
+            Chat.Add(string.IsNullOrEmpty(myName) ? "Player " + myNumber : myName, t, Time.realtimeSinceStartup, true);
+            if (broadcast != null) broadcast.SendReliable(m);
+            if (SharedWorld.TestSink != null) SharedWorld.TestSink.SendReliable(m);      // the audit looks at what would be sent
+        }
+
+        // A message that arrived from a player's connection. The name shown is the one belonging to that connection, never anything inside the message.
+        public bool HandleChat(ulong senderId, string senderName, byte[] msg)
+        {
+            string t;
+            if (!Chat.TryDecode(msg, out t)) return false;
+            if (!Chat.Allow(senderId, Time.realtimeSinceStartup)) return false;
+            Chat.Add(senderName, t, Time.realtimeSinceStartup, false);
+            return true;
+        }
+
+        float nextNames;
+        public string MyDisplayName { get { return myName; } }
+        public void RefreshNamesNow() { RefreshNames(); }
+
+        // Everybody is shown by their Steam name. Names of people who are not on my friends list may need a moment to arrive, so this runs every few seconds.
+        void RefreshNames()
+        {
+            try
+            {
+                var order = new List<Peer>(peers); order.RemoveAll(p => p.IsBot);
+                // everybody ranks players by SteamID the same way, so a duplicate name gets the same number on every PC
+                var entries = new List<KeyValuePair<int, string>>();      // rank -> cleaned name; peer index = -1 for me
+                var ranks = new List<int>(); var names = new List<string>(); var owners = new List<Peer>();
+                ranks.Add(myNumber); names.Add(PlayerNames.Clean(SteamFriends.GetPersonaName(), "Player " + myNumber)); owners.Add(null);
+                foreach (var p in order)
+                {
+                    var id = new CSteamID(p.Id);
+                    string raw = SteamFriends.GetFriendPersonaName(id);
+                    if (string.IsNullOrEmpty(raw) || raw == "[unknown]") SteamFriends.RequestUserInformation(id, true);
+                    ranks.Add(p.Number); names.Add(PlayerNames.Clean(raw, "Player " + p.Number)); owners.Add(p);
+                }
+                var idx = new List<int>(); for (int i = 0; i < ranks.Count; i++) idx.Add(i);
+                idx.Sort((a, b) => ranks[a].CompareTo(ranks[b]));
+                var sorted = new string[idx.Count]; for (int i = 0; i < idx.Count; i++) sorted[i] = names[idx[i]];
+                PlayerNames.MakeUnique(sorted);
+                for (int i = 0; i < idx.Count; i++)
+                {
+                    var owner = owners[idx[i]];
+                    if (owner == null) myName = sorted[i]; else owner.Name = sorted[i].StartsWith("Player ") ? null : sorted[i];
+                }
+            }
+            catch (Exception e) { Log("names: " + e.GetType().Name); }
+        }
+
         void NetTick()
         {
             hub.Pump();
+            if (Time.realtimeSinceStartup >= nextNames) { nextNames = Time.realtimeSinceStartup + 5f; RefreshNames(); }
             if (lanHub != null) lanHub.Pump();
             if (peers.Count == 0) { SkinPersistTick(); return; }
             Perf.Begin(); WorldSync.Tick(); Perf.End("WorldSync.Tick");
@@ -371,6 +449,7 @@ namespace CoopMod
                     switch (MessageGate.Classify(rel, HostPeer() == p))
                     {
                         case Route.Visibility: ReceiveVisibility(p, rel); break;
+                        case Route.Chat: HandleChat(p.Id, p.Label, rel); break;
                         case Route.Shared: SharedWorld.Handle(rel); break;
                         case Route.Oversized: Log("ignored an oversized message from " + p.Label); break;
                         case Route.SnapshotNotFromHost: Log("ignored world data from " + p.Label + " (not the host)"); break;
@@ -644,17 +723,27 @@ namespace CoopMod
             broadcast.SendReliable(msg);
         }
 
-        void ReceiveVisibility(Peer p, byte[] msg)
+        // Which parts of the other player's BUD are shown. Comes from another PC: a wrong count or a short message is refused instead of looping or throwing.
+        public static Dictionary<int, bool> ParseVisibility(byte[] msg)
         {
             try
             {
+                if (msg == null || msg.Length < 3 || msg.Length > 40000) return null;
                 var r = new BinaryReader(new MemoryStream(msg)); r.ReadByte();
                 int n = r.ReadUInt16();
+                if (n > 4000 || 3 + n * 5 > msg.Length) return null;
                 var map = new Dictionary<int, bool>();
                 for (int i = 0; i < n; i++) { int k = r.ReadInt32(); map[k] = r.ReadBoolean(); }
-                p.VisMap = map;
+                return map;
             }
-            catch (Exception e) { Log("visibility: bad message " + e.GetType().Name); }
+            catch (Exception) { return null; }
+        }
+
+        void ReceiveVisibility(Peer p, byte[] msg)
+        {
+            var map = ParseVisibility(msg);
+            if (map == null) { Log("visibility: bad message from " + p.Label); return; }
+            p.VisMap = map;
         }
 
         void ApplyVisibility(Peer p)
@@ -762,6 +851,14 @@ namespace CoopMod
             if (!Online) return;
             SaveCodeOnce();
             foreach (var p in peers) DrawMarker(p);
+            if (!CoopUI.Hidden || chatOpen) CoopUI.ChatLog(Chat.Lines, Time.realtimeSinceStartup, chatOpen);
+            if (chatOpen)
+            {
+                bool send, cancel;
+                chatText = CoopUI.ChatBox(chatText, out send, out cancel);
+                if (Time.frameCount - chatOpenFrame <= 1) chatText = "";     // the key that opened the box must not be typed into it
+                if (send) { SendChat(chatText); CloseChat(); } else if (cancel) CloseChat();
+            }
 
             if (lobby != null && lobby.InLobby && Time.time < codePopupUntil && !joinOpen && !CoopUI.Hidden) CoopUI.CodePopup(lobby.Code, codePopupUntil - 12f);
             if (joinOpen)
@@ -774,13 +871,14 @@ namespace CoopMod
 
             var chips = new List<CoopUI.Chip>();
             foreach (var p in peers) chips.Add(new CoopUI.Chip { Name = p.Label, Ok = p.Connected });
-            string hint = peers.Count == 0 ? "NOBODY YET   F2 MAKE A CODE   F3 ENTER A CODE"
-                                           : "F2 CODE   F3 JOIN   F7 RE-JOIN HOST WORLD   F4 FIND PLAYER";
+            string hint = peers.Count == 0 ? "NOBODY YET   F2 MAKE A CODE   F3 ENTER A CODE   T CHAT"
+                                           : "F2 CODE   F3 JOIN   T CHAT   F7 RE-JOIN HOST WORLD   F4 FIND PLAYER";
             string code = lobby != null && lobby.InLobby ? lobby.Code : "";
             string notice = (WorldSync.Status + " " + SharedWorld.Status).Trim();
             if (code.Length == 0 && lobby != null && lobby.Status.Length > 0) notice = (lobby.Status + "  " + notice).Trim();
             var hostNow = HostPeer();
-            string who = hostNow == null ? "PLAYER " + myNumber + "  HOSTING" : "PLAYER " + myNumber + "  GUEST OF " + hostNow.Label.ToUpper();
+            string me = string.IsNullOrEmpty(myName) ? "Player " + myNumber : myName;
+            string who = hostNow == null ? me.ToUpper() + "  HOSTING" : me.ToUpper() + "  GUEST OF " + hostNow.Label.ToUpper();
             CoopUI.StatusBar(who, chips, hint, code, notice.ToUpper());
         }
 
