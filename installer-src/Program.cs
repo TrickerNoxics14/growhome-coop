@@ -21,7 +21,8 @@ static class Program
     const int BundledVersion = 1;                                   // version of the CoopMod.dll embedded in this exe
 
     static string installDir, gameDir;
-    static bool noPrompt;
+    static bool noPrompt, viaSteam;
+    static string useGame;
 
     static int Main(string[] args)
     {
@@ -42,9 +43,12 @@ static class Program
                 case "--install-dir": installDir = args[++i]; break;
                 case "--game-dir": gameOverride = args[++i]; break;
                 case "--skin": skin = args[++i]; break;
+                case "--via-steam": viaSteam = true; break;      // start through Steam (needed when this Steam account only has the game via Family Sharing)
+                case "--use-game": useGame = args[++i]; break;   // use an existing patched copy at this path
             }
         }
         gameDir = Path.Combine(installDir, "game");
+        if (useGame != null) { gameDir = useGame; installDir = Path.GetDirectoryName(Path.GetFullPath(useGame)); }
 
         try
         {
@@ -297,6 +301,13 @@ static class Program
         {
             Console.WriteLine("Grow Home is already running. Close it first (only one copy can run at a time).");
             Console.WriteLine("Press Enter to close."); Console.ReadLine(); return;
+        }
+        if (viaSteam)
+        {
+            Process.Start(new ProcessStartInfo("steam://rungameid/323320") { UseShellExecute = true });
+            Console.WriteLine("Starting Grow Home Co-op through Steam...");
+            System.Threading.Thread.Sleep(2500);
+            return;
         }
         var psi = new ProcessStartInfo(Path.Combine(gameDir, "GrowHome.exe"), "-screen-width 1280 -screen-height 720 -popupwindow")
         {
