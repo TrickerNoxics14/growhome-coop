@@ -82,7 +82,7 @@ $tmp = Join-Path ([IO.Path]::GetTempPath()) ("gh-verify-" + [Guid]::NewGuid().To
 $ok = $true
 try {
     Start-Sleep -Seconds 4
-    $live = Invoke-RestMethod "https://raw.githubusercontent.com/$Repo/main/version.json?t=$([DateTime]::UtcNow.Ticks)" -Headers @{ 'Cache-Control' = 'no-cache' }
+    $live = (Invoke-WebRequest "https://raw.githubusercontent.com/$Repo/main/version.json?t=$([DateTime]::UtcNow.Ticks)" -Headers @{ "Cache-Control" = "no-cache" } -UseBasicParsing).Content | ConvertFrom-Json
     $dllPath = Join-Path $tmp 'CoopMod.dll'; Invoke-WebRequest "https://raw.githubusercontent.com/$Repo/main/CoopMod.dll?t=$([DateTime]::UtcNow.Ticks)" -OutFile $dllPath
     $publicKey = [IO.File]::ReadAllText((Join-Path (Split-Path $KeyFile) 'public-key.xml'))
     $pk = New-Object System.Security.Cryptography.RSACryptoServiceProvider; $pk.FromXmlString($publicKey)
