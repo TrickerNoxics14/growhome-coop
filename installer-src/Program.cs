@@ -18,7 +18,7 @@ static partial class Program
 {
     const string ExpectedAssemblySha = "8d99d51663061da95016e496116191850b6a5437250cfc38bb8576027b2aa40d";   // Grow Home Steam build 857617
     static string ManifestUrl = "https://raw.githubusercontent.com/TrickerNoxics14/growhome-coop/main/version.json";
-    const int BundledVersion = 3;                                   // version of the CoopMod.dll embedded in this exe
+    const int BundledVersion = 4;                                   // version of the CoopMod.dll embedded in this exe
 
     static string installDir, gameDir;
     static bool noPrompt, auditMode;
@@ -46,7 +46,8 @@ static partial class Program
                 case "--install-dir": installDir = args[++i]; break;
                 case "--game-dir": cliGameOverride = args[++i]; break;
                 case "--skin": cliSkin = args[++i]; break;
-                case "--via-steam": forceSteam = true; break;    // always start through Steam (the launcher picks this by itself for accounts that only borrow the game)
+                case "--via-steam": break;                       // old option, ignored: every account starts the game directly (the audit showed borrowing accounts can)
+                case "--force-steam": forceSteam = true; break;  // start through Steam first (only for people who want Steam to own the start)
                 case "--direct": forceDirect = true; break;      // never start through Steam
                 case "--yes": assumeYes = true; break;           // answer every question with yes and do not wait for a key at the end (text mode)
                 case "--console": consoleMode = true; break;     // text window instead of the game-styled window

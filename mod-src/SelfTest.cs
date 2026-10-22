@@ -401,6 +401,63 @@ namespace CoopMod
             Check("CHAT", "the network gate sends chat messages to the chat, and refuses oversized ones", MessageGate.Classify(enc, false) == Route.Chat && MessageGate.Classify(big, true) == Route.Oversized, MessageGate.Classify(enc, false).ToString());
         }
 
+        // Rooms: a public room lets anybody in, a private one only the players the host accepted; nobody the host refused; hostile room data changes nothing.
+        void CheckRooms()
+        {
+            const ulong host = 100, guest = 200, other = 300;
+            bool open = RoomRules.Allowed("open", host, guest, "", "") && RoomRules.Allowed("open", host, host, "", "");
+            bool priv = !RoomRules.Allowed("private", host, guest, "", "") && RoomRules.Allowed("private", host, host, "", "")
+                && RoomRules.Allowed("private", host, guest, RoomRules.AddId("", guest), "") && !RoomRules.Allowed("private", host, other, RoomRules.AddId("", guest), "");
+            bool refused = !RoomRules.Allowed("open", host, guest, "200", "200") && !RoomRules.Allowed("private", host, guest, "200", "200");
+            bool unknownMode = !RoomRules.Allowed("", host, guest, "", "") && !RoomRules.Allowed("OPEN", host, guest, "", "") && !RoomRules.Allowed(null, host, guest, "", "");
+            Check("ROOMS", "a public room lets everybody in; a private room only the players the host accepted; a refused player never; an unknown or missing mode counts as private", open && priv && refused && unknownMode, "open=" + open + " private=" + priv + " refused=" + refused + " unknownMode=" + unknownMode);
+            float oldScale = Time.timeScale;
+            try
+            {
+                Time.timeScale = 0f;
+                bool still = CoopUI.GlitchFor(Time.realtimeSinceStartup - 1f) == 0f && CoopUI.GlitchFor(Time.realtimeSinceStartup + 0.01f) > 0.9f;
+                Check("MOUSE-FREE", "a window that opened a moment ago stands perfectly still (no flicker), even while game time is stopped", still, "");
+            }
+            finally { Time.timeScale = oldScale; }
+            Check("ROOMS", "if Steam hands the room to another member the room is closed for me (a new owner is never trusted as host)", RoomRules.HostChanged(100, 300) && !RoomRules.HostChanged(100, 100) && !RoomRules.HostChanged(0, 300), "");
+            string junk = new string('9', 5000);
+            bool hostile = RoomRules.ParseIds(junk).Count == 0 && RoomRules.ParseIds("abc,,-1,0,99999999999999999999999,5").Count == 1 && !RoomRules.Allowed("private", host, 0, "0", "") && RoomRules.ParseIds(null).Count == 0;
+            string many = ""; for (ulong i = 1; i <= 40; i++) many = RoomRules.AddId(many, i);
+            bool capped = RoomRules.ParseIds(many).Count == RoomRules.MaxIds && RoomRules.AddId("5,5,5", 5) == "5";
+            Check("ROOMS", "broken or oversized room data is read safely: junk ignored, lists capped, no duplicates, id 0 never allowed", hostile && capped, "hostile=" + hostile + " capped=" + capped);
+            Check("ROOMS", "room names from strangers are cleaned like player names", RoomRules.RoomName("<b>Eve</b>\u2764 room") == "bEvebroom" || RoomRules.RoomName("<b>Eve</b>").IndexOf('<') < 0 && RoomRules.RoomName("").Length > 0, RoomRules.RoomName("<b>Eve</b>\u2764 room"));
+        }
+
+        // The mouse must work in the code box and room menus: the game hides and locks it every frame unless the mod frees it.
+        void CheckCursorLive()
+        {
+            var cb = UnityEngine.Object.FindObjectOfType(typeof(CoopBehaviour)) as CoopBehaviour;
+            if (cb == null) { Check("MOUSE-FREE", "the mod is running", false, ""); return; }
+            // a player who closed the game must not stay standing in the world
+            bool timing = !CoopBehaviour.SignalLost(true, 105f, 100f) && CoopBehaviour.SignalLost(true, 107f, 100f) && !CoopBehaviour.SignalLost(false, 500f, 0f);
+            var ghost = new Peer { Id = 5555UL, Number = 2 };
+            ghost.Clone = new GameObject("ghost-test");
+            cb.DropGhostForTest(ghost);
+            Check("GHOST-LEFT", "a player who stops sending (closed the game) is taken out of my world after 6 seconds, and is not removed earlier", timing && ghost.Clone == null && ghost.Driver == null, "timing=" + timing + " cloneGone=" + (ghost.Clone == null));
+            bool oldLock = Screen.lockCursor, oldShow = Screen.showCursor;
+            try
+            {
+                cb.OpenJoinForTest();
+                Screen.lockCursor = true; Screen.showCursor = false;
+                cb.ApplyCursorForTest();
+                bool freed = cb.WantMouseForTest && !Screen.lockCursor && Screen.showCursor;
+                var esType = Type.GetType("UnityEngine.EventSystems.EventSystem, UnityEngine.UI");
+                var es = esType == null ? null : UnityEngine.Object.FindObjectOfType(esType) as Behaviour;
+                bool menusFrozen = es == null || (cb.MenusFrozenForTest && !es.enabled);
+                cb.CloseJoinForTest();
+                cb.ApplyCursorForTest();
+                bool released = !cb.WantMouseForTest && !cb.MenusFrozenForTest && (es == null || es.enabled);
+                Check("MOUSE-FREE", "while my window is open the game's own menus (Continue, New Game...) get no clicks or keys, and work again when it closes" + (es == null ? " (no menu event system in this scene)" : ""), menusFrozen && released, "frozen=" + menusFrozen + " released=" + released);
+                Check("MOUSE-FREE", "while the code box is open the mouse is shown and unlocked (so JOIN and CANCEL can be clicked), and the game gets it back when it closes", freed && !cb.WantMouseForTest, "freed=" + freed);
+            }
+            finally { Screen.lockCursor = oldLock; Screen.showCursor = oldShow; cb.CloseJoinForTest(); }
+        }
+
         // The real mod: a message from a player's connection is shown under that connection's name; mine is sent and shown.
         void CheckChatLive()
         {
@@ -419,6 +476,42 @@ namespace CoopMod
             string sent = null; foreach (var m in sink.Messages) if (m.Length > 0 && m[0] == Chat.Msg) { string t; if (Chat.TryDecode(m, out t)) sent = t; }
             var mine = Chat.Lines.Count > before ? Chat.Lines[Chat.Lines.Count - 1] : null;
             Check("CHAT", "my message is sent once and shown as mine; empty ones are not sent", sent == "hi everybody" && CountType(Chat.Msg) == 1 && mine != null && mine.Mine && Chat.Lines.Count == before + 1, "sent=\"" + sent + "\" messages=" + CountType(Chat.Msg) + " lines +" + (Chat.Lines.Count - before));
+
+            // the box must always be closable: Enter sends and closes, Esc closes without sending, and the key that opened it does not close it again
+            sink.Messages.Clear();
+            cb.OpenChatForTest("typed in the box");
+            bool opened = cb.ChatOpen;
+            cb.HandleChatKeys(true, false);
+            Check("CHAT", "Enter sends what was typed and closes the box (the player can move again)", opened && !cb.ChatOpen && CountType(Chat.Msg) == 1, "opened=" + opened + ", still open=" + cb.ChatOpen + ", sent=" + CountType(Chat.Msg));
+
+            // the real key events a text box gets: every kind of Enter sends, Esc closes, nothing else does
+            Func<EventType, KeyCode, char, EventModifiers, Event> ke = (type, code, ch, mods) => { var e = new Event(); e.type = type; e.keyCode = code; e.character = ch; e.modifiers = mods; return e; };
+            bool enters = CoopUI.ChatKeyAction(ke(EventType.KeyDown, KeyCode.Return, '\n', EventModifiers.None)) == 1
+                && CoopUI.ChatKeyAction(ke(EventType.KeyDown, KeyCode.Return, '\0', EventModifiers.None)) == 1
+                && CoopUI.ChatKeyAction(ke(EventType.KeyDown, KeyCode.KeypadEnter, '\n', EventModifiers.None)) == 1
+                && CoopUI.ChatKeyAction(ke(EventType.KeyDown, KeyCode.None, '\n', EventModifiers.None)) == 1
+                && CoopUI.ChatKeyAction(ke(EventType.KeyDown, KeyCode.None, '\r', EventModifiers.None)) == 1
+                && CoopUI.ChatKeyAction(ke(EventType.KeyDown, KeyCode.Return, '\n', EventModifiers.Shift)) == 1;
+            Check("CHAT", "every kind of Enter (also Shift+Enter, number pad, character only) sends instead of making a new line", enters, "");
+            bool others = CoopUI.ChatKeyAction(ke(EventType.KeyDown, KeyCode.Escape, '\0', EventModifiers.None)) == 2
+                && CoopUI.ChatKeyAction(ke(EventType.KeyDown, KeyCode.A, 'a', EventModifiers.None)) == 0
+                && CoopUI.ChatKeyAction(ke(EventType.KeyDown, KeyCode.Space, ' ', EventModifiers.None)) == 0
+                && CoopUI.ChatKeyAction(ke(EventType.KeyUp, KeyCode.Return, '\n', EventModifiers.None)) == 0
+                && CoopUI.ChatKeyAction(ke(EventType.Repaint, KeyCode.Return, '\n', EventModifiers.None)) == 0
+                && CoopUI.ChatKeyAction(null) == 0;
+            Check("CHAT", "Esc closes; letters, space, key releases and repaints do nothing", others, "");
+            sink.Messages.Clear();
+            cb.OpenChatForTest("not for sending");
+            cb.HandleChatKeys(false, true);
+            Check("CHAT", "Esc closes the box and sends nothing", !cb.ChatOpen && CountType(Chat.Msg) == 0, "still open=" + cb.ChatOpen + ", sent=" + CountType(Chat.Msg));
+            cb.PressTForTest();
+            cb.HandleChatKeys(true, false);
+            bool stillOpenAfterOpeningKey = cb.ChatOpen;
+            cb.HandleChatKeys(false, true);
+            Check("CHAT", "the very frame the box opens, Enter does not close it by accident, and it can still be closed afterwards", stillOpenAfterOpeningKey, "open right after opening=" + stillOpenAfterOpeningKey);
+            bool closedFinally = !cb.ChatOpen;
+            if (!closedFinally) { cb.OpenChatForTest(""); cb.HandleChatKeys(false, true); }
+            Check("CHAT", "after all of that the chat is closed and the keyboard belongs to the game again", !cb.ChatOpen, "open=" + cb.ChatOpen);
         }
 
         void CheckGate()
@@ -487,6 +580,7 @@ namespace CoopMod
             try { CheckNetSanity(); } catch (Exception e) { Check("AUDIT-ERROR", "network sanity checks ran", false, Describe(e)); }
             try { CheckNames(); } catch (Exception e) { Check("AUDIT-ERROR", "name checks ran", false, Describe(e)); }
             try { CheckChat(); } catch (Exception e) { Check("AUDIT-ERROR", "chat checks ran", false, Describe(e)); }
+            try { CheckRooms(); } catch (Exception e) { Check("AUDIT-ERROR", "room checks ran", false, Describe(e)); }
 
             float begin = Time.realtimeSinceStartup;
             bool pressed = false; float menuAt = -1f;
@@ -518,6 +612,7 @@ namespace CoopMod
             try { CheckSavePaths(); } catch (Exception e) { Check("AUDIT-ERROR", "save path checks ran", false, Describe(e)); }
             try { CheckNamesLive(); } catch (Exception e) { Check("AUDIT-ERROR", "live name check ran", false, Describe(e)); }
             try { CheckChatLive(); } catch (Exception e) { Check("AUDIT-ERROR", "live chat check ran", false, Describe(e)); }
+            try { CheckCursorLive(); } catch (Exception e) { Check("AUDIT-ERROR", "live mouse check ran", false, Describe(e)); }
 
             var roots = new List<PlantRoot>();
             foreach (PlantRoot r in UnityEngine.Object.FindObjectsOfType(typeof(PlantRoot))) if (SharedWorld.PlantId(r) != null) roots.Add(r);

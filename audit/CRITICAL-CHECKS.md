@@ -64,6 +64,7 @@ Where they run: **game** = inside the real game, using the real send/receive cod
 | NET-SANITY | game | pose packets with impossible numbers (NaN, a million metres, absurd speeds) or cut off are thrown away; bad visibility messages are refused; the log cannot be flooded | thousands of damaged packets and messages |
 | PLAYER-NAMES | game | players are shown by their Steam names in the status bar, the player list, the name tags and the messages; odd names are cleaned (no emoji or markup, 16 letters at most, duplicates numbered) | cleaning rules on 20 odd names, plus the real Steam name read in the running game |
 | CHAT | game | in-game chat (T to open): text only, 100 characters, shown under the name of the sender's connection, flood-limited, damaged messages refused, routed by the network gate | cleaning rules, hostile messages, a 20-message flood, the real mod sending and receiving |
+| LAUNCH-DIRECT-FIRST | exe | every account (also one that only borrows the game) starts the co-op copy directly; Steam is only the fallback when a direct start fails; the old --via-steam option is ignored | the start decision for every option combination, and the audit's own launch uses the old option |
 | GAME-STARTS-MODDED | script | the modded game starts, loads the mod, reaches the world alone, no crash | log lines, process state, crash folders |
 | NO-UNEXPECTED-ERRORS | script | the mod log and the Unity log have no errors or exceptions from the mod | scans both logs (only lines tagged `[test]` are allowed: the injected fault) |
 | ORIGINAL-UNTOUCHED | script | the real Steam save files and the original Grow Home assembly are exactly as before | hashes before and after |
@@ -88,3 +89,6 @@ Where they run: **game** = inside the real game, using the real send/receive cod
 
 `audit\deploy.ps1 [-Laptop]` installs the build on this PC (and the laptop over ssh) but only if `audit\last-full-pass.md` (written by a full passing run) names exactly the mod that is built now.
 It never publishes anything: pushing a new version to GitHub for friends is a separate, deliberate step.
+| ROOMS | game | public rooms (listed, anyone joins) and private rooms (code + host accepts each player with Y/N) | pure rule checks with hostile data |
+| MOUSE-FREE | game | the mouse works in the code box and room menus | the real mod frees the cursor against a game that locks it |
+| GHOST-LEFT | game | a player who left does not stay standing in the world | the 6-second rule and the real removal of the copy |

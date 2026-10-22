@@ -203,7 +203,7 @@ else {
         $launcherLog = Join-Path (Split-Path $GameDir -Parent) 'launcher.log'
         $logBefore = if (Test-Path $launcherLog) { @(Get-Content $launcherLog).Count } else { 0 }
         $launchClock = [Diagnostics.Stopwatch]::StartNew()
-        $launcher = Start-Process -FilePath $ExeFile -ArgumentList @('--use-game', "`"$GameDir`"", '--no-update', '--auto-play', '--game-args', '"-screen-width 800 -screen-height 450"') -PassThru
+        $launcher = Start-Process -FilePath $ExeFile -ArgumentList @('--use-game', "`"$GameDir`"", '--no-update', '--auto-play', '--via-steam', '--game-args', '"-screen-width 800 -screen-height 450"') -PassThru
         $null = $launcher.Handle                                    # without this PowerShell loses the exit code
         Say "  launcher window opened and started the game; it plays by itself now, please do not touch it"
         if (-not $launcher.WaitForExit(180000)) { try { $launcher.Kill() } catch { }; $launcherCode = -1 } else { $launcherCode = $launcher.ExitCode }

@@ -232,3 +232,23 @@ static partial class Program
         DeleteGameCopy(dst2);
     }
 }
+
+static partial class Program
+{
+    // Every account starts the game directly; Steam is only the fallback.
+    static void AuditStartMode()
+    {
+        bool f = forceSteam, d = forceDirect;
+        try
+        {
+            forceSteam = false; forceDirect = false;
+            Check("LAUNCH-DIRECT-FIRST", !StartViaSteamFirst(), "with no options the game is started directly (no Steam restart, no Steam setting changed)", "");
+            Check("LAUNCH-DIRECT-FIRST", !StartViaSteamFirst() && IsBorrower("\"LastOwner\" \"76561198000000001\"", "39734274"), "...also for an account that only borrows the game", "");
+            forceSteam = true; forceDirect = false;
+            Check("LAUNCH-DIRECT-FIRST", StartViaSteamFirst(), "starting through Steam first happens only when asked for (--force-steam)", "");
+            forceSteam = true; forceDirect = true;
+            Check("LAUNCH-DIRECT-FIRST", !StartViaSteamFirst(), "--direct always wins", "");
+        }
+        finally { forceSteam = f; forceDirect = d; }
+    }
+}

@@ -24,6 +24,9 @@ static partial class Program
 
     static void Say(string s) { if (sayHook != null) sayHook(s); else Console.WriteLine(s); }
 
+    // Every account, including one that only borrows the game, starts the co-op copy directly: no Steam restart, no Steam setting changed. Steam is only used as the fallback when a direct start fails.
+    static bool StartViaSteamFirst() { return forceSteam && !forceDirect; }
+
     static void Progress(int percent) { if (progressHook != null) progressHook(Math.Max(0, Math.Min(100, percent))); }
 
     static void ShowInstallProgress(int percent)
@@ -145,7 +148,7 @@ static partial class Program
         // 2. how to start: an account that only borrows the game can only start it through Steam
         string account = ActiveAccount();
         bool borrower = IsBorrower(ManifestText(), account);
-        bool viaSteamNow = forceSteam || (borrower && !forceDirect);
+        bool viaSteamNow = StartViaSteamFirst();
         Log("steam account " + account + "; borrower=" + borrower + "; start through steam=" + viaSteamNow);
 
         // 3. Steam has to be running and signed in either way (the game talks to it)
@@ -211,7 +214,7 @@ static partial class Program
             case Outcome.GameDied:
                 if (!throughSteam && mayFallBack)
                 {
-                    Say("The game closed right after starting. This Steam account may only borrow the game, so I will start it through Steam instead.");
+                    Say("The game closed right after starting. I will try through Steam instead.");
                     return LaunchAndVerify(true, true, false);
                 }
                 Say("The game closed right after starting. If a friend or your other PC is playing from the same Steam library, Steam Family Sharing allows only one person at a time.");

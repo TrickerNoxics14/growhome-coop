@@ -133,7 +133,7 @@ namespace CoopMod
 
         // The game pauses itself whenever its window loses focus. In co-op that only covers the screen with the pause menu, so resume right away.
         bool hasFocus = true; float focusLostAt;
-        void OnApplicationFocus(bool focus) { hasFocus = focus; if (!focus) focusLostAt = Time.realtimeSinceStartup; }
+        void OnApplicationFocus(bool focus) { hasFocus = focus; if (!focus) { focusLostAt = Time.realtimeSinceStartup; CloseChat(); } }
 
         void ResumeAfterFocusLoss()
         {
@@ -172,7 +172,9 @@ namespace CoopMod
             if (Online && Input.GetKeyDown(KeyCode.F10)) AddBot();
             if (Online && Input.GetKeyDown(KeyCode.F11)) RemoveBot();
             if (Online && Input.GetKeyDown(KeyCode.F3)) OpenJoinBox();
-            if (Online && !chatOpen && !joinOpen && Input.GetKeyDown(KeyCode.T) && WorldSync.InWorld()) OpenChat();
+            ChatKeys();
+            RoomTick();
+            if (Online && !chatOpen && !joinOpen && !hostMenuOpen && Input.GetKeyDown(KeyCode.T) && WorldSync.InWorld()) OpenChat();
             if (!Online && Time.time >= nextSteamTry) TryStartSteam();
             if (Online) NetTick();
             if (Time.realtimeSinceStartup >= nextUpdateNote) { nextUpdateNote = Time.realtimeSinceStartup + 10f; string note = TakeUpdateNotice(Here("coop-update-ready.txt")); if (note != null) { CoopUI.Toast(note); Log("update notice shown: " + note); } }
@@ -251,8 +253,8 @@ namespace CoopMod
                 RenumberPeers();
                 SetupLan();
 
-                lobby = new Lobby { OnMember = AddMember };
-                hub.AcceptUnknown = id => { if (lobby != null && lobby.IsMember(id)) { AddMember(id); return true; } return false; };
+                lobby = new Lobby { OnMember = OfferMember };
+                hub.AcceptUnknown = id => { if (lobby != null && lobby.Allowed(id)) { AddMember(id); return true; } return false; };
                 Log("steam up; my SteamID64=" + myId + " (I am Player " + myNumber + "); other players: " + peers.Count + "; host is " + (HostPeer() == null ? "me" : HostPeer().Label));
             }
             catch (Exception e) { Log("steam init not ready: " + e.GetType().Name + " " + e.Message); }
@@ -361,8 +363,29 @@ namespace CoopMod
 
         bool chatOpen; string chatText = ""; int chatOpenFrame;
 
+        public bool ChatOpen { get { return chatOpen; } }
+        public void OpenChatForTest(string text) { OpenChat(); chatText = text; chatOpenFrame = -10; }
+        public void PressTForTest() { if (!chatOpen) OpenChat(); }
+
+        // Enter sends, Esc closes. Read from the keyboard directly every frame: the text box of the game's GUI eats the Enter key before any code around it can see it,
+        // which left the box open and the player unable to move. The box also closes by itself when the player leaves the world.
+        void ChatKeys()
+        {
+            if (!chatOpen) return;
+            HandleChatKeys(Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter), Input.GetKeyDown(KeyCode.Escape));
+        }
+
+        public void HandleChatKeys(bool enter, bool escape)
+        {
+            if (!chatOpen) return;
+            if (!WorldSync.InWorld()) { CloseChat(); return; }
+            if (Time.frameCount - chatOpenFrame <= 1) return;            // the key that opened the box must not also close it
+            if (enter) { SendChat(chatText); CloseChat(); }
+            else if (escape) CloseChat();
+        }
+
         void OpenChat() { chatOpen = true; chatText = ""; chatOpenFrame = Time.frameCount; InputManager.Push(this, "ui"); }
-        void CloseChat() { if (chatOpen) { chatOpen = false; InputManager.Pop(this); } }
+        void CloseChat() { if (chatOpen) { chatOpen = false; chatText = ""; InputManager.Pop(this); } }
 
         // Says something to everybody (and shows it to me). Empty or all-unprintable text is not sent.
         public void SendChat(string text)
@@ -419,6 +442,17 @@ namespace CoopMod
             catch (Exception e) { Log("names: " + e.GetType().Name); }
         }
 
+        // A player who stopped sending (closed the game, lost the connection) must not stay standing in my world: their copy is removed and comes back by itself when they return.
+        public static bool SignalLost(bool wasConnected, float now, float lastPacket) { return wasConnected && now - lastPacket > 6f; }
+
+        void DropGhost(Peer p)
+        {
+            if (p.Clone != null) { Destroy(p.Clone); Log("copy of " + p.Label + " removed (no signal)"); }
+            p.ClearClone(); p.Driver = null;
+        }
+
+        public void DropGhostForTest(Peer p) { DropGhost(p); }
+
         void NetTick()
         {
             hub.Pump();
@@ -435,7 +469,7 @@ namespace CoopMod
                 Perf.Begin(); CloneDiag(p); Perf.End("CloneDiag");
                 Perf.Begin(); SkinTick(p); Perf.End("SkinTick");
                 SyncLog(p);
-                if (p.WasConnected && Time.time - p.LastPacketTime > 6f) { p.WasConnected = false; if (!p.IsBot) CoopUI.Toast("SIGNAL LOST: " + p.Label); }
+                if (SignalLost(p.WasConnected, Time.time, p.LastPacketTime)) { p.WasConnected = false; DropGhost(p); if (!p.IsBot) CoopUI.Toast("SIGNAL LOST: " + p.Label); }
                 if (Time.time >= p.NextPing)
                 {
                     p.NextPing = Time.time + 1f;
@@ -569,12 +603,39 @@ namespace CoopMod
 
         InputMethodTracker trackerWeDisabled;
 
+        // While my window is open the game's own menus (Continue, New Game, ...) must not receive the clicks and keys meant for it: switch their event system off, and back on afterwards.
+        Behaviour menuEvents;
+        public bool MenusFrozenForTest { get { return menuEvents != null && !menuEvents.enabled; } }
+
+        void FreezeMenus(bool freeze)
+        {
+            try
+            {
+                if (freeze)
+                {
+                    var t = Type.GetType("UnityEngine.EventSystems.EventSystem, UnityEngine.UI");
+                    var cur = t == null ? null : t.GetProperty("current", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static).GetValue(null, null) as Behaviour;
+                    if (cur != null && cur.enabled) { cur.enabled = false; menuEvents = cur; }
+                }
+                else if (menuEvents != null) { menuEvents.enabled = true; menuEvents = null; }
+            }
+            catch (Exception e) { Log("freeze menus failed: " + e.GetType().Name + " " + e.Message); menuEvents = null; }
+        }
+
+        // The code box, the join window and the room menu need the mouse; the game hides and re-locks it every frame unless its tracker is switched off (as in the pause menu).
+        bool WantMouse { get { return joinOpen || hostMenuOpen; } }
+        public bool WantMouseForTest { get { return WantMouse; } }
+        public void ApplyCursorForTest() { LateUpdate(); }
+        public void OpenJoinForTest() { if (!joinOpen) OpenJoinBox(); }
+        public void CloseJoinForTest() { CloseJoinBox(); }
+
         void LateUpdate()
         {
-            bool menuOpen = Online && AnyConnected && Singleton<PauseManager>.Exists && PauseManager.Paused;
-            if (menuOpen)
+            bool paused = Online && AnyConnected && Singleton<PauseManager>.Exists && PauseManager.Paused;
+            FreezeMenus(WantMouse);
+            if (paused || WantMouse)
             {
-                if (Time.timeScale < 0.5f) Time.timeScale = 1f;
+                if (paused && Time.timeScale < 0.5f) Time.timeScale = 1f;
                 // InputMethodTracker re-locks and hides the mouse every frame while timeScale > 0, which breaks the menu's mouse
                 // handling. Switch it off while the menu is open and manage the cursor ourselves.
                 if (trackerWeDisabled == null && Singleton<InputMethodTracker>.Exists)
@@ -812,28 +873,89 @@ namespace CoopMod
             try { var te = new TextEditor(); te.content = new GUIContent(s); te.SelectAll(); te.Copy(); } catch (Exception) { }
         }
 
-        // F2: make (or show again) my invite code. Friends type it with F3 and everybody in the lobby connects to everybody.
+        // F2: make a room (public or private) or, when I already have one, copy its code again. Friends type the code with F3 (or click a public room).
+        bool hostMenuOpen; float hostMenuAt;
+        readonly List<ulong> pending = new List<ulong>();     // players waiting for me (the host of a private room) to say yes or no
+        float nextPoll; bool waitToasted;
+        List<Room> noRooms = new List<Room>();
+
         void MakeInviteCode()
         {
             if (lobby == null) return;
             if (lobby.InLobby) { CopyToClipboard(lobby.Code); joinMsg = "code copied again: " + lobby.Code; return; }
-            lobby.Create();
+            if (hostMenuOpen) { CloseHostMenu(); return; }
+            CloseJoinBox();
+            hostMenuOpen = true; hostMenuAt = Time.realtimeSinceStartup;
+            InputManager.Push(this, "ui");
+        }
+
+        void CloseHostMenu() { if (hostMenuOpen) { hostMenuOpen = false; InputManager.Pop(this); } }
+
+        public void MakeRoom(bool open, bool listed) { if (lobby != null && !lobby.InLobby) lobby.Create(open, listed); }
+
+        // A member of my room showed up: connect when the room rules allow it; in a private room I am the one who decides.
+        void OfferMember(ulong id)
+        {
+            if (lobby == null || id == 0 || id == myId) return;
+            if (lobby.Allowed(id)) { AddMember(id); return; }
+            if (lobby.IsOwner && lobby.IsMember(id) && !lobby.Decided(id) && !pending.Contains(id) && pending.Count < 4)
+            {
+                pending.Add(id);
+                Log("room: " + id + " asks to join my private room");
+                CoopUI.Toast("SOMEONE WANTS TO JOIN");
+            }
+        }
+
+        public bool PendingFor(ulong id) { return pending.Contains(id); }
+        public int PendingCount { get { return pending.Count; } }
+        public void AnswerJoinRequest(bool accept)
+        {
+            if (pending.Count == 0 || lobby == null) return;
+            ulong id = pending[0]; pending.RemoveAt(0);
+            if (accept) { lobby.Approve(id); AddMember(id); Log("room: accepted " + id); } else { lobby.Deny(id); Log("room: refused " + id); }
+        }
+
+        string PendingName()
+        {
+            if (pending.Count == 0) return "";
+            try { return PlayerNames.Clean(SteamFriends.GetFriendPersonaName(new CSteamID(pending[0])), "A PLAYER"); } catch (Exception) { return "A PLAYER"; }
+        }
+
+        void RoomTick()
+        {
+            if (!Online || lobby == null || !lobby.InLobby) return;
+            if (pending.Count > 0 && !chatOpen && !joinOpen && !hostMenuOpen)
+            {
+                if (Input.GetKeyDown(KeyCode.Y)) AnswerJoinRequest(true);
+                else if (Input.GetKeyDown(KeyCode.N)) AnswerJoinRequest(false);
+            }
+            if (Time.time < nextPoll) return;
+            nextPoll = Time.time + 2f;
+            lobby.Poll();
+            pending.RemoveAll(p => !lobby.IsMember(p));
+            int adm = lobby.MyAdmission();
+            if (adm == 2) { lobby.Leave(); lobby.Status = "the host did not accept you"; joinMsg = lobby.Status; CoopUI.Toast("THE HOST SAID NO"); }
+            else if (adm == 1) { lobby.Status = "waiting for the host to let you in..."; if (!waitToasted) { waitToasted = true; CoopUI.Toast("WAITING FOR THE HOST TO LET YOU IN"); } }
+            else waitToasted = false;
         }
 
         void SaveCodeOnce()
         {
             if (lobby == null || !lobby.InLobby || codeSaved) return;
-            codeSaved = true; codePopupUntil = Time.time + 12f;
+            codeSaved = true; codePopupUntil = Time.realtimeSinceStartup + 12f;
             CopyToClipboard(lobby.Code);
             try { File.WriteAllText(Here("my-invite-code.txt"), lobby.Code); } catch (Exception) { }
         }
 
-        // F3: a small box to type a friend's code. While it is open the game ignores movement keys so typing does not move BUD.
+        // F3: the join window. While it is open the game ignores movement keys so typing does not move BUD, and the mouse works.
         void OpenJoinBox()
         {
-            joinOpen = !joinOpen;
-            joinText = ""; joinMsg = ""; joinOpenedAt = Time.time;
-            if (joinOpen) InputManager.Push(this, "ui"); else InputManager.Pop(this);
+            if (joinOpen) { CloseJoinBox(); return; }
+            CloseHostMenu();
+            joinOpen = true;
+            joinText = ""; joinMsg = ""; joinOpenedAt = Time.realtimeSinceStartup;
+            InputManager.Push(this, "ui");
+            if (lobby != null) lobby.RequestRooms();
         }
 
         void CloseJoinBox() { if (joinOpen) { joinOpen = false; InputManager.Pop(this); } }
@@ -860,18 +982,28 @@ namespace CoopMod
                 if (send) { SendChat(chatText); CloseChat(); } else if (cancel) CloseChat();
             }
 
-            if (lobby != null && lobby.InLobby && Time.time < codePopupUntil && !joinOpen && !CoopUI.Hidden) CoopUI.CodePopup(lobby.Code, codePopupUntil - 12f);
+            if (lobby != null && lobby.InLobby && Time.realtimeSinceStartup < codePopupUntil && !joinOpen && !hostMenuOpen && !CoopUI.Hidden) CoopUI.CodePopup(lobby.Code, codePopupUntil - 12f);
+            if (hostMenuOpen)
+            {
+                int pick = CoopUI.HostMenu(hostMenuAt);
+                if (pick == 1 || pick == 2 || pick == 4) { CloseHostMenu(); MakeRoom(pick == 1, pick != 2); }
+                else if (pick == 3) CloseHostMenu();
+            }
             if (joinOpen)
             {
-                bool ok, cancel;
-                joinText = CoopUI.JoinBox(joinText, joinMsg, joinOpenedAt, out ok, out cancel);
-                if (ok) SubmitJoin();
-                else if (cancel) CloseJoinBox();
+                int act, roomIdx;
+                var rooms = lobby != null ? lobby.Rooms : noRooms;
+                joinText = CoopUI.JoinWindow(joinText, joinMsg, joinOpenedAt, rooms, lobby != null && lobby.Listing, out act, out roomIdx);
+                if (act == CoopUI.JoinCode) SubmitJoin();
+                else if (act == CoopUI.JoinCancel) CloseJoinBox();
+                else if (act == CoopUI.JoinRefresh && lobby != null) lobby.RequestRooms();
+                else if (act == CoopUI.JoinRoom && roomIdx >= 0 && roomIdx < rooms.Count) { lobby.Join(rooms[roomIdx].Id); CloseJoinBox(); }
             }
+            if (pending.Count > 0 && !joinOpen && !hostMenuOpen && !CoopUI.Hidden) CoopUI.JoinRequest(PendingName());
 
             var chips = new List<CoopUI.Chip>();
             foreach (var p in peers) chips.Add(new CoopUI.Chip { Name = p.Label, Ok = p.Connected });
-            string hint = peers.Count == 0 ? "NOBODY YET   F2 MAKE A CODE   F3 ENTER A CODE   T CHAT"
+            string hint = peers.Count == 0 ? "NOBODY YET   F2 MAKE A ROOM   F3 JOIN A ROOM   T CHAT"
                                            : "F2 CODE   F3 JOIN   T CHAT   F7 RE-JOIN HOST WORLD   F4 FIND PLAYER";
             string code = lobby != null && lobby.InLobby ? lobby.Code : "";
             string notice = (WorldSync.Status + " " + SharedWorld.Status).Trim();

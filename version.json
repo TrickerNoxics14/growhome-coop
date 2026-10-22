@@ -1,7 +1,7 @@
 ﻿{
-    "version":  3,
+    "version":  4,
     "dll":  "https://raw.githubusercontent.com/TrickerNoxics14/growhome-coop/main/CoopMod.dll",
-    "sha256":  "de6fe455747cd411d96795176d6871e1ea1a27d6b5e21f2daf8e2f03ee1264ce",
-    "notes":  "player Steam names, in-game chat (T), signed updates, network hardening, new launcher window, background update checks",
-    "signature":  "oNTBm+nw8RqURa5f4vZsMv4RkCapTHEuF0N+oNtFV8I5MuKSIyuKwbe2ECghDG/5GG8qgS9HdIHq8DnI0l6QudbarFTP4S9tGahbCVc9Lc1g9LTFdSLBpAlpBGma8k11FsPcERsuRSox1RwyY+4/Wznf5LPEfhMVHxpoeqNHDJHjbcRDQI7YA76dXYq7+4E2q5tXibRbOZD3EJPLmy6VWeCtVSQqV9aivkV+RdNKuZ+/rv1yKRKdnyuBWPTdi7z7zg/5t5h4R6Ufx27tLlq+BC+8vp03NYfr2gLX9/ReH7YKwcZ5N4+H1QxLSuwocA3qOf2PRYUbqOT4QpTLOTEjrXlPq+eVbBZwYZy3SI4s6PIQ0Dm3tlzRXQ4lW8HvH5cPcMoXDswnv6sTqNoHTLjicFvXDGB+IDN5SqVUL0lXU0J3Ji3RupD2oiVM9MwvRHsB18BZgR6fQmohNfrx0qvgQYGQskN4PbzKFBCm+KS2PTJ3luA8Hi0XViSUYKaSDJsb"
+    "sha256":  "90253f37b802e4c1f4311024a90d84768d0a362f1b328833f9a66168470117e8",
+    "notes":  "Rooms (public, listed with host approval, private), join list, chat fixes, player names, mouse and menu fixes, players who leave disappear, safer room rules",
+    "signature":  "Ib23Mj39JAdUi9CXoVmUPrh/wq1vhmsweUL40SsLg42MG98HuxrtHV3XcG0KAasvgvqeF2/JHa0ktf6K8StEldINvwW5inVRVgE9u/TKPCkxA21rGIM7wUdGcGCIuQOrX9XanmvUiTg6U9Qef2tJOQIOgrs+OuKAhpoEjepXGObNvYJK/BjR/zmzyXzussZNkbItFfIyUmokMJtMyN00wL47z6aokPrgE9HOLW7/tNoKw318pYbVmZBi5GQ1NzVuiFF9PREYCjqfkCpflfAu/RVvvOWoFLnw69gOGaiAdaokD2U4Hc09JYFKcAttEhe/juLu9l5lIBATfkcmMsT/7xPmPo5j4eoo9JrgabbQG+zUatiw48rk7bMATiUVBifkFfOL94rNNeB7FdVVYZ3wi+C3sDQRJ5hapVfoiqmTeN12i3oNk5kRLEDihYHIn07Y7oeiKOc5+Cso/UAqIZ0NlR2EckyIJ6IlyzcoAIciwSvHZ83gpWV8hVjJsx7CSd79"
 }

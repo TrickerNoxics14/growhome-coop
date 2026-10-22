@@ -36,3 +36,9 @@ What the program does on your PC, who it trusts, and what it does about it. Ever
 ## Reporting a problem
 
 Open an issue on the repository, or message the author privately for anything that could harm players.
+
+## Rooms, join requests, chat (v4)
+- A room's data (mode, name, accepted and refused players) is written by the room's owner and read as untrusted text: lists are length- and count-capped, numbers parsed strictly, names cleaned like player names; anything unknown counts as private.
+- In a private or "you accept" room nobody is connected to until the host says yes (Y/N). Only the player who owned the room when you joined is the host: if Steam hands the room to somebody else, the room closes for you, so a waiting player can never accept themselves.
+- Chat shows the sender's real connection name, plain text, 100 characters, 5 messages per 6 seconds.
+- Joining somebody else's public room means playing in their world: a world snapshot is accepted only from the room's host and is size- and checksum-checked; join only rooms you trust.

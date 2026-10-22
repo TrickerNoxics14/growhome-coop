@@ -174,6 +174,8 @@ static partial class Program
         string runTitle = "Starting"; string resultLine = ""; bool running, failed;
         DateTime closeAt = DateTime.MaxValue;
         public int ExitCode;
+        public int AskGraceMs = 900;           // a question ignores keys and clicks for this long, so a key still held down or a double click cannot answer it unseen
+        DateTime askShownAt = DateTime.MinValue; Point askMouse;      // where the mouse sat when the question appeared
         readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 33 };
         readonly bool testing;
 
@@ -316,13 +318,14 @@ static partial class Program
             var done = new ManualResetEvent(false);
             Post(() => ShowAsk(question, options, i => { result = i; done.Set(); }));
             done.WaitOne();
+            try { Log("asked: " + question.Trim() + "  ->  " + options[Math.Max(0, Math.Min(options.Length - 1, result))]); } catch { }
             return result;
         }
 
         public void ShowAsk(string question, string[] options, Action<int> answered)
         {
             askFrom = Current == View.Ask ? askFrom : Current;
-            Current = View.Ask; askText = question; askOptions = options; askDone = answered;
+            Current = View.Ask; askText = question; askOptions = options; askDone = answered; askShownAt = DateTime.UtcNow; askMouse = Cursor.Position;
             items.Clear(); Selected = 0;
             for (int i = 0; i < options.Length; i++) { int k = i; items.Add(new MenuItem { Text = options[i], Click = () => Answer(k) }); }
             if (!testing && !Visible) Show();
@@ -340,12 +343,14 @@ static partial class Program
 
         // ---- input ------------------------------------------------------------------------------------------------------------------
 
-        public void Activate() { if (Selected >= 0 && Selected < items.Count && items[Selected].Click != null) items[Selected].Click(); }
+        bool AskIsSettling() { return Current == View.Ask && (DateTime.UtcNow - askShownAt).TotalMilliseconds < AskGraceMs; }
+
+        public void Activate() { if (AskIsSettling()) return; if (Selected >= 0 && Selected < items.Count && items[Selected].Click != null) items[Selected].Click(); }
 
         public void Back()
         {
             if (Current == View.Settings) { ShowHome(); RefreshStatus(); }
-            else if (Current == View.Ask) Answer(askOptions.Length - 1);
+            else if (Current == View.Ask) { if (!AskIsSettling()) Answer(askOptions.Length - 1); }
             else if (Current == View.Home) Close();
             else if (Current == View.Run && failed) { ShowHome(); RefreshStatus(); }
         }
@@ -361,8 +366,8 @@ static partial class Program
                 case Keys.Left: case Keys.Right: if (Current == View.Settings && Selected < items.Count && items[Selected].Value != null) Activate(); break;
                 case Keys.Enter: case Keys.Space: Activate(); break;
                 case Keys.Escape: Back(); break;
-                case Keys.Y: if (Current == View.Ask && askOptions.Length == 2) Answer(0); break;
-                case Keys.N: if (Current == View.Ask && askOptions.Length == 2) Answer(1); break;
+                case Keys.Y: if (Current == View.Ask && askOptions.Length == 2 && !AskIsSettling()) Answer(0); break;
+                case Keys.N: if (Current == View.Ask && askOptions.Length == 2 && !AskIsSettling()) Answer(1); break;
             }
         }
 
@@ -376,7 +381,16 @@ static partial class Program
 
         public int ItemAt(PointF design) { for (int i = 0; i < items.Count; i++) if (items[i].Hit.Contains(design)) return i; return -1; }
 
-        protected override void OnMouseMove(MouseEventArgs e) { int i = ItemAt(ToDesign(e.Location, ClientSize)); if (i >= 0 && i != Selected) { Selected = i; Invalidate(); } base.OnMouseMove(e); }
+        // Hovering selects a line, like the game's menus. But on a question the mouse usually happens to be resting right where an answer appears:
+        // until it has really moved, where it sits chooses nothing (otherwise Enter answers whatever is under a resting mouse).
+        public void Hover(PointF design, Point screen)
+        {
+            if (Current == View.Ask && Math.Abs(screen.X - askMouse.X) + Math.Abs(screen.Y - askMouse.Y) < 8) return;
+            int i = ItemAt(design);
+            if (i >= 0 && i != Selected) { Selected = i; Invalidate(); }
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e) { Hover(ToDesign(e.Location, ClientSize), Cursor.Position); base.OnMouseMove(e); }
         protected override void OnMouseClick(MouseEventArgs e) { int i = ItemAt(ToDesign(e.Location, ClientSize)); if (i >= 0) { Selected = i; Activate(); } base.OnMouseClick(e); }
 
         // ---- drawing ----------------------------------------------------------------------------------------------------------------

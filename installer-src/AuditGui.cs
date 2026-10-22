@@ -122,7 +122,7 @@ static partial class Program
         // input: keyboard and mouse, the way a person uses the game's own menus
         using (var win = new GameWindow(true))
         {
-            var handle = win.Handle; Snap(win, PW, PH);
+            var handle = win.Handle; Snap(win, PW, PH); win.AskGraceMs = 0;
             int start = win.Selected;
             win.PressKey(Keys.Down); win.PressKey(Keys.Down);
             Check("GUI-INPUT", win.Selected == 2, "the arrow keys move the selection", start + " -> " + win.Selected);
@@ -137,6 +137,36 @@ static partial class Program
             Snap(win, PW, PH);
             var p = win.ToClient(win.ItemCenter(1), new Size(PW, PH));
             Check("GUI-INPUT", win.ItemAt(win.ItemCenter(1)) == 1 && win.ItemAt(new PointF(5, 5)) == -1, "a point on a menu line selects it, a point elsewhere does not", "");
+
+            // a question ignores keys and clicks in its first moments: a key still held down or a double click must not answer it before it can be read
+            win.AskGraceMs = 900;
+            int graceAnswer = -1; var graceDone = new ManualResetEvent(false);
+            var tg = new Thread(() => { win.AskForTest("Restart Steam now?", new[] { "Yes", "No" }, out graceAnswer); graceDone.Set(); });
+            tg.Start();
+            for (int i = 0; i < 100 && win.Current != GameWindow.View.Ask; i++) { Application.DoEvents(); Thread.Sleep(20); }
+            win.PressKey(Keys.N); win.PressKey(Keys.Enter); win.PressKey(Keys.Space); win.Activate(); win.PressKey(Keys.Escape);
+            bool unanswered = !graceDone.WaitOne(250) && win.Current == GameWindow.View.Ask;
+            Check("GUI-INPUT", unanswered, "a question ignores N, Enter, Space, a click and Escape in its first moments", unanswered ? "" : "it was answered unseen: " + graceAnswer);
+            for (int i = 0; i < 60; i++) { Application.DoEvents(); Thread.Sleep(20); }
+            win.PressKey(Keys.Y); graceDone.WaitOne(5000);
+            Check("GUI-INPUT", graceAnswer == 0, "after that moment the question can be answered", "answer " + graceAnswer);
+            win.AskGraceMs = 0;
+
+            // a mouse resting where an answer appears must not choose it: Enter still gives the default (Yes), until the mouse really moves
+            win.AskGraceMs = 0;
+            int restAnswer = -1; var restDone = new ManualResetEvent(false);
+            var tr = new Thread(() => { win.AskForTest("Restart Steam now?", new[] { "Yes", "No" }, out restAnswer); restDone.Set(); });
+            tr.Start();
+            for (int i = 0; i < 100 && win.Current != GameWindow.View.Ask; i++) { Application.DoEvents(); Thread.Sleep(20); }
+            Snap(win, PW, PH);
+            var noSpot = win.ItemCenter(1);
+            win.Hover(noSpot, Cursor.Position);
+            int resting = win.Selected;
+            win.Hover(noSpot, new Point(Cursor.Position.X + 60, Cursor.Position.Y + 40));
+            int moved = win.Selected;
+            Check("GUI-INPUT", resting == 0 && moved == 1, "a resting mouse chooses nothing on a question; moving it onto an answer does", "resting -> " + resting + ", moved -> " + moved);
+            win.Selected = 0; win.PressKey(Keys.Enter); restDone.WaitOne(5000);
+            Check("GUI-INPUT", restAnswer == 0, "Enter on a fresh question means Yes", "answer " + restAnswer);
 
             // a question asked from another thread (as the real flow does) is answered from the window
             int answer = -1;

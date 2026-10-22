@@ -52,6 +52,12 @@ namespace CoopMod
         public string Status = "";
         public Action<ulong> OnMember;     // called for every member we learn about (including ourselves)
 
+        public bool IsOpen;                  // the room I am in is public (listed, anybody may join)
+        public readonly List<Room> Rooms = new List<Room>();
+        public bool Listing;                 // a room-list request is running
+        bool wantOpen, wantListed;
+        public ulong HostId;                 // who owned the room when I got in: the only one I ever treat as the host (Steam hands a room to somebody else when its owner leaves)
+        CallResult<LobbyMatchList_t> listed;
         CallResult<LobbyCreated_t> created;
         CallResult<LobbyEnter_t> entered;
         Callback<LobbyChatUpdate_t> update;
@@ -61,13 +67,15 @@ namespace CoopMod
             created = CallResult<LobbyCreated_t>.Create(OnCreated);
             entered = CallResult<LobbyEnter_t>.Create(OnEntered);
             update = Callback<LobbyChatUpdate_t>.Create(OnUpdate);
+            listed = CallResult<LobbyMatchList_t>.Create(OnListed);
         }
 
-        public void Create()
+        public void Create(bool open, bool listed)
         {
             if (InLobby) return;
-            Status = "creating invite code...";
-            created.Set(SteamMatchmaking.CreateLobby(ELobbyType.k_ELobbyTypeInvisible, 8));
+            wantOpen = open; wantListed = listed;
+            Status = "creating room...";
+            created.Set(SteamMatchmaking.CreateLobby((open || listed) ? ELobbyType.k_ELobbyTypePublic : ELobbyType.k_ELobbyTypeInvisible, 8));
         }
 
         public void Join(ulong lobbyId)
@@ -76,13 +84,16 @@ namespace CoopMod
             entered.Set(SteamMatchmaking.JoinLobby(new CSteamID(lobbyId)));
         }
 
-        public void Leave() { if (InLobby) { SteamMatchmaking.LeaveLobby(Id); InLobby = false; Code = ""; } }
+        public void Leave() { if (InLobby) { SteamMatchmaking.LeaveLobby(Id); InLobby = false; IsOpen = false; Code = ""; } }
 
         void OnCreated(LobbyCreated_t r, bool ioFailure)
         {
             if (ioFailure || r.m_eResult != EResult.k_EResultOK) { Status = "could not create an invite code (" + r.m_eResult + ")"; CoopBehaviour.Log("lobby: create failed " + r.m_eResult + " io=" + ioFailure); return; }
             Id = new CSteamID(r.m_ulSteamIDLobby);
-            InLobby = true;
+            InLobby = true; IsOpen = wantOpen; HostId = SteamUser.GetSteamID().m_SteamID;
+            SteamMatchmaking.SetLobbyData(Id, "gh", "1");
+            SteamMatchmaking.SetLobbyData(Id, "mode", wantOpen ? RoomRules.Open : RoomRules.Private);
+            SteamMatchmaking.SetLobbyData(Id, "name", RoomRules.RoomName(SteamFriends.GetPersonaName()));
             Code = InviteCode.Encode(Id.m_SteamID);
             Status = "invite code: " + Code; CoopUI.Toast("INVITE CODE READY");
             CoopBehaviour.Log("lobby: created " + Id.m_SteamID + ", code " + Code);
@@ -98,7 +109,7 @@ namespace CoopMod
                 return;
             }
             Id = new CSteamID(r.m_ulSteamIDLobby);
-            InLobby = true;
+            InLobby = true; HostId = SteamMatchmaking.GetLobbyOwner(Id).m_SteamID;
             Code = InviteCode.Encode(Id.m_SteamID);
             Status = "joined " + Code; CoopUI.Toast("LOBBY LINK ESTABLISHED");
             CoopBehaviour.Log("lobby: joined " + Id.m_SteamID);
@@ -123,6 +134,58 @@ namespace CoopMod
                 ulong m = SteamMatchmaking.GetLobbyMemberByIndex(Id, i).m_SteamID;
                 if (OnMember != null) OnMember(m);
             }
+        }
+
+        // ---- rooms: who may join, and the public list ----------------------------------------------------------------------------------
+
+        string Data(string key) { return InLobby ? SteamMatchmaking.GetLobbyData(Id, key) : ""; }
+        public string Mode { get { return RoomRules.Mode(Data("mode")); } }
+        public bool IsOwner { get { return InLobby && HostId == SteamUser.GetSteamID().m_SteamID && OwnerId() == HostId; } }
+
+        // May I connect to this member of the room?
+        public bool Allowed(ulong user)
+        {
+            return InLobby && IsMember(user) && RoomRules.Allowed(Data("mode"), HostId, user, Data("ok"), Data("no"));
+        }
+
+        // true once the host has said yes or no to this player
+        public bool Decided(ulong user) { return RoomRules.ParseIds(Data("ok")).Contains(user) || RoomRules.ParseIds(Data("no")).Contains(user); }
+
+        public void Approve(ulong user) { if (IsOwner) SteamMatchmaking.SetLobbyData(Id, "ok", RoomRules.AddId(Data("ok"), user)); }
+        public void Deny(ulong user) { if (IsOwner) SteamMatchmaking.SetLobbyData(Id, "no", RoomRules.AddId(Data("no"), user)); }
+
+        // What the room says about me: 0 = fine, 1 = waiting for the host, 2 = the host refused me
+        public int MyAdmission()
+        {
+            if (!InLobby || IsOwner) return 0;
+            ulong me = SteamUser.GetSteamID().m_SteamID;
+            if (RoomRules.ParseIds(Data("no")).Contains(me)) return 2;
+            return RoomRules.Allowed(Data("mode"), HostId, me, Data("ok"), Data("no")) ? 0 : 1;
+        }
+
+        // Look again at who is in the room (people who joined, a host who has just said yes).
+        public void Poll() { if (InLobby && RoomRules.HostChanged(HostId, OwnerId())) { Leave(); Status = "the host left the room"; CoopBehaviour.Log("lobby: the host left, room closed"); return; } if (InLobby) { IsOpen = Mode == RoomRules.Open; SyncMembers(); } }
+
+        public void RequestRooms()
+        {
+            if (Listing) return;
+            Listing = true; Status = "looking for rooms...";
+            SteamMatchmaking.AddRequestLobbyListStringFilter("gh", "1", ELobbyComparison.k_ELobbyComparisonEqual);
+            SteamMatchmaking.AddRequestLobbyListDistanceFilter(ELobbyDistanceFilter.k_ELobbyDistanceFilterWorldwide);
+            SteamMatchmaking.AddRequestLobbyListResultCountFilter(20);
+            listed.Set(SteamMatchmaking.RequestLobbyList());
+        }
+
+        void OnListed(LobbyMatchList_t r, bool ioFailure)
+        {
+            Listing = false; Rooms.Clear();
+            if (ioFailure) { Status = "could not get the room list"; return; }
+            for (int i = 0; i < (int)r.m_nLobbiesMatching && i < 20; i++)
+            {
+                var id = SteamMatchmaking.GetLobbyByIndex(i);
+                Rooms.Add(new Room { Id = id.m_SteamID, Ask = RoomRules.Mode(SteamMatchmaking.GetLobbyData(id, "mode")) != RoomRules.Open, Name = RoomRules.RoomName(SteamMatchmaking.GetLobbyData(id, "name")), Players = SteamMatchmaking.GetNumLobbyMembers(id), Max = SteamMatchmaking.GetLobbyMemberLimit(id) });
+            }
+            Status = Rooms.Count == 0 ? "no rooms right now" : Rooms.Count + " room(s)";
         }
 
         // The lobby owner is the player who made the code: the host whose world everybody plays in (0 when not in a lobby).

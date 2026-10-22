@@ -55,7 +55,7 @@ namespace CoopMod
         public static void Frame(Rect r, float glitch)
         {
             Build();
-            if (glitch > 0f) r.x += Random.Range(-4f, 4f) * glitch * S;
+            if (glitch > 0f) r.x += Mathf.Sin(Time.realtimeSinceStartup * 90f) * 4f * glitch * S;
             Fill(r, Panel);
             for (float y = r.y + 2f * S; y < r.yMax - 1f; y += 3f * S) Fill(new Rect(r.x, y, r.width, 1f), new Color(0f, 0f, 0f, 0.10f));
             float t = Mathf.Max(1f, S);
@@ -69,6 +69,9 @@ namespace CoopMod
         }
 
         public static void Frame(Rect r) { Frame(r, 0f); }
+
+        // The shake of a window that has just opened: 0.3 s of real time, then perfectly still (game time may be slowed or stopped, which once made the windows shake for ever).
+        public static float GlitchFor(float openedAtRealtime) { return Mathf.Clamp01(1f - (Time.realtimeSinceStartup - openedAtRealtime) / 0.3f); }
 
         public static void DashedRule(float x, float y, float width, Color c)
         {
@@ -106,17 +109,17 @@ namespace CoopMod
 
         public static void Toast(string message)
         {
-            toasts.Add(new ToastItem { Msg = message.ToUpper(), Born = Time.time });
+            toasts.Add(new ToastItem { Msg = message.ToUpper(), Born = Time.realtimeSinceStartup });
             while (toasts.Count > 4) toasts.RemoveAt(0);
         }
 
         static void DrawToasts()
         {
-            toasts.RemoveAll(t => Time.time - t.Born > 6.5f);
+            toasts.RemoveAll(t => Time.realtimeSinceStartup - t.Born > 6.5f);
             float y = 16f * S;
             foreach (var t in toasts)
             {
-                float age = Time.time - t.Born;
+                float age = Time.realtimeSinceStartup - t.Born;
                 int shown = Mathf.Clamp((int)(age * 48f), 0, t.Msg.Length);                // typewriter, like the game's own prompts
                 float alpha = age > 5.5f ? Mathf.Clamp01((6.5f - age)) : 1f;
                 string full = "M.O.M>>> " + t.Msg;
@@ -188,44 +191,98 @@ namespace CoopMod
             Build();
             float w = 600f * S, h = 160f * S;
             var r = new Rect((Screen.width - w) / 2f, 70f * S, w, h);
-            Frame(r, Mathf.Clamp01(1f - (Time.time - openedAt) / 0.3f));
+            Frame(r, GlitchFor(openedAt));
             Header(r, "INVITE CODE", r.y + 12f * S);
-            int shown = Mathf.Clamp((int)((Time.time - openedAt) * 20f), 0, code.Length);
+            int shown = Mathf.Clamp((int)((Time.realtimeSinceStartup - openedAt) * 20f), 0, code.Length);
             Text(new Rect(r.x, r.y + 52f * S, w, 50f * S), code.Substring(0, shown), White, 36, TextAnchor.MiddleCenter);
             Text(new Rect(r.x, r.y + 116f * S, w, 24f * S), "COPIED   FRIENDS PRESS F3 AND TYPE IT IN", CyanDim, 12, TextAnchor.MiddleCenter);
         }
 
-        // Returns the edited text; ok/cancel are set when the player confirms or backs out.
-        public static string JoinBox(string textIn, string message, float openedAt, out bool ok, out bool cancel)
+        public const int JoinNone = 0, JoinCode = 1, JoinCancel = 2, JoinRefresh = 3, JoinRoom = 4;
+
+        // The join window: type a friend's code, or click one of the public rooms. Everything is clickable with the mouse; Enter joins the typed code, Esc closes.
+        public static string JoinWindow(string textIn, string message, float openedAt, List<Room> rooms, bool listing, out int action, out int room)
         {
             Build();
-            ok = cancel = false;
-            float w = 580f * S, h = 230f * S;
+            action = JoinNone; room = -1;
+            float w = 600f * S, h = 440f * S;
             var r = new Rect((Screen.width - w) / 2f, (Screen.height - h) / 2f, w, h);
-            Frame(r, Mathf.Clamp01(1f - (Time.time - openedAt) / 0.3f));
-            Header(r, "M.O.M>>> ENTER INVITE CODE", r.y + 12f * S);
+            Frame(r, GlitchFor(openedAt));
+            Header(r, "M.O.M>>> JOIN A ROOM", r.y + 12f * S);
 
-            var fr = new Rect(r.x + 40f * S, r.y + 68f * S, w - 80f * S, 46f * S);
+            Text(new Rect(r.x + 30f * S, r.y + 50f * S, w - 60f * S, 20f * S), "TYPE AN INVITE CODE", CyanDim, 12, TextAnchor.MiddleLeft);
+            var fr = new Rect(r.x + 30f * S, r.y + 72f * S, w - 230f * S, 42f * S);
             Fill(fr, new Color(0f, 0.03f, 0.09f, 0.9f));
             Fill(new Rect(fr.x, fr.yMax - 2f * S, fr.width, 2f * S), Pink);
             GUI.SetNextControlName("codebox");
             field.fontSize = Mathf.RoundToInt(22 * S);
-            string t = GUI.TextField(fr, textIn, 20, field);
+            string t = GUI.TextField(fr, textIn, 20, field).ToUpperInvariant();
             GUI.FocusControl("codebox");
-            t = t.ToUpperInvariant();
+            if (Button(new Rect(fr.xMax + 20f * S, fr.y, 140f * S, fr.height), "JOIN")) action = JoinCode;
 
-            Text(new Rect(r.x + 20f * S, r.y + 124f * S, w - 40f * S, 22f * S), message.ToUpper(), Pink, 12, TextAnchor.MiddleCenter);
+            Text(new Rect(r.x + 30f * S, r.y + 128f * S, w - 60f * S, 20f * S), "OR PICK A LISTED ROOM", CyanDim, 12, TextAnchor.MiddleLeft);
+            float y = r.y + 152f * S, rowH = 34f * S;
+            Fill(new Rect(r.x + 30f * S, y, w - 60f * S, 2f * S), CyanDim);
+            if (rooms.Count == 0) Text(new Rect(r.x + 30f * S, y + 4f * S, w - 60f * S, rowH), listing ? "LOOKING..." : "NO ROOMS RIGHT NOW", CyanDim, 14, TextAnchor.MiddleLeft);
+            for (int i = 0; i < rooms.Count && i < 5; i++)
+            {
+                var rr = new Rect(r.x + 30f * S, y + 4f * S + i * rowH, w - 60f * S, rowH);
+                bool hover = rr.Contains(Event.current.mousePosition);
+                Text(rr, (hover ? ">>>" : "") + rooms[i].Name.ToUpper(), hover ? Pink : Cyan, 16, TextAnchor.MiddleLeft);
+                Text(rr, (rooms[i].Ask ? "ASK   " : "") + rooms[i].Players + "/" + rooms[i].Max, hover ? Pink : CyanDim, 14, TextAnchor.MiddleRight);
+                if (GUI.Button(rr, GUIContent.none, GUIStyle.none)) { action = JoinRoom; room = i; }
+            }
 
-            float bw = 160f * S, bh = 38f * S, by = r.y + h - bh - 18f * S;
-            if (Button(new Rect(r.x + 60f * S, by, bw, bh), "JOIN")) ok = true;
-            if (Button(new Rect(r.xMax - 60f * S - bw, by, bw, bh), "CANCEL")) cancel = true;
+            Text(new Rect(r.x + 20f * S, r.yMax - 110f * S, w - 40f * S, 22f * S), message.ToUpper(), Pink, 12, TextAnchor.MiddleCenter);
+            float bw = 160f * S, bh = 38f * S, by = r.yMax - bh - 18f * S;
+            if (Button(new Rect(r.x + 60f * S, by, bw, bh), "REFRESH")) action = JoinRefresh;
+            if (Button(new Rect(r.xMax - 60f * S - bw, by, bw, bh), "CANCEL")) action = JoinCancel;
             var ev = Event.current;
             if (ev.type == EventType.KeyDown)
             {
-                if (ev.keyCode == KeyCode.Return || ev.keyCode == KeyCode.KeypadEnter) ok = true;
-                if (ev.keyCode == KeyCode.Escape) cancel = true;
+                if (ev.keyCode == KeyCode.Return || ev.keyCode == KeyCode.KeypadEnter) action = JoinCode;
+                if (ev.keyCode == KeyCode.Escape) action = JoinCancel;
             }
             return t;
+        }
+
+        // Choose what kind of room to make: 1 = public, 4 = listed but the host accepts, 2 = private (code only), 3 = cancel (also keys 1, 2, 3 and Esc).
+        public static int HostMenu(float openedAt)
+        {
+            Build();
+            int choice = 0;
+            float w = 560f * S, h = 330f * S;
+            var r = new Rect((Screen.width - w) / 2f, (Screen.height - h) / 2f, w, h);
+            Frame(r, GlitchFor(openedAt));
+            Header(r, "M.O.M>>> MAKE A ROOM", r.y + 12f * S);
+            float bw = 440f * S, bh = 38f * S, bx = r.x + (w - bw) / 2f;
+            if (Button(new Rect(bx, r.y + 56f * S, bw, bh), "PUBLIC ROOM")) choice = 1;
+            Text(new Rect(bx, r.y + 92f * S, bw, 18f * S), "LISTED FOR EVERYBODY. ANYONE CAN JOIN", CyanDim, 11, TextAnchor.MiddleCenter);
+            if (Button(new Rect(bx, r.y + 120f * S, bw, bh), "LISTED, YOU ACCEPT")) choice = 4;
+            Text(new Rect(bx, r.y + 156f * S, bw, 18f * S), "LISTED, BUT EACH PLAYER WAITS FOR YOUR YES", CyanDim, 11, TextAnchor.MiddleCenter);
+            if (Button(new Rect(bx, r.y + 184f * S, bw, bh), "PRIVATE ROOM")) choice = 2;
+            Text(new Rect(bx, r.y + 220f * S, bw, 18f * S), "NOT LISTED. CODE ONLY. YOU ACCEPT EACH PLAYER", CyanDim, 11, TextAnchor.MiddleCenter);
+            if (Button(new Rect(bx, r.y + 250f * S, bw, bh), "CANCEL")) choice = 3;
+            var ev = Event.current;
+            if (ev.type == EventType.KeyDown)
+            {
+                if (ev.keyCode == KeyCode.Alpha1 || ev.keyCode == KeyCode.Keypad1) choice = 1;
+                if (ev.keyCode == KeyCode.Alpha2 || ev.keyCode == KeyCode.Keypad2) choice = 4;
+                if (ev.keyCode == KeyCode.Alpha3 || ev.keyCode == KeyCode.Keypad3) choice = 2;
+                if (ev.keyCode == KeyCode.Escape) choice = 3;
+            }
+            return choice;
+        }
+
+        // A player wants into my private room: Y accepts, N refuses (read in Update).
+        public static void JoinRequest(string name)
+        {
+            Build();
+            float w = 560f * S, h = 96f * S;
+            var r = new Rect((Screen.width - w) / 2f, 70f * S, w, h);
+            Frame(r, 0f);
+            Header(r, "M.O.M>>> " + name.ToUpper() + " WANTS TO JOIN", r.y + 12f * S);
+            Text(new Rect(r.x, r.y + 56f * S, w, 24f * S), "Y ACCEPT      N REFUSE", Pink, 16, TextAnchor.MiddleCenter);
         }
 
         // ---- chat ------------------------------------------------------------------------------------------------------------------------
@@ -235,7 +292,7 @@ namespace CoopMod
         {
             Build();
             const float life = 14f;
-            float lh = 26f * S, x = 20f * S, y = Screen.height - (open ? 168f : 118f) * S;
+            float lh = 26f * S, x = 20f * S, y = Screen.height - (open ? 190f : 146f) * S;
             int shown = 0;
             for (int i = lines.Count - 1; i >= 0 && shown < 7; i--)
             {
@@ -245,34 +302,47 @@ namespace CoopMod
                 string who = l.Name.ToUpperInvariant() + ": ";
                 float nw = Width(who, 16);
                 Color nameColor = l.Mine ? Cyan : Pink;
+                Fill(new Rect(x - 4f * S, y, nw + Width(l.Text, 16) + 12f * S, lh), new Color(0f, 0.03f, 0.09f, 0.55f * a));
                 Text(new Rect(x, y, nw + 4f * S, lh), who, new Color(nameColor.r, nameColor.g, nameColor.b, a), 16, TextAnchor.MiddleLeft);
                 Text(new Rect(x + nw, y, 900f * S, lh), l.Text, new Color(White.r, White.g, White.b, a), 16, TextAnchor.MiddleLeft);
                 y -= lh; shown++;
             }
         }
 
-        // The box you type into (T opens it, Enter sends, Esc closes).
+        // What a key event means for the chat box: 1 = send, 2 = close, 0 = nothing. Any Enter counts (also with Shift, on the number pad, or when only the character arrives).
+        public static int ChatKeyAction(Event ev)
+        {
+            if (ev == null || ev.type != EventType.KeyDown) return 0;
+            if (ev.keyCode == KeyCode.Return || ev.keyCode == KeyCode.KeypadEnter || ev.character == '\n' || ev.character == '\r') return 1;
+            if (ev.keyCode == KeyCode.Escape) return 2;
+            return 0;
+        }
+
+        static GUIStyle chatField;
+
+        // The box you type into (T opens it, Enter sends, Esc closes). Enter is taken here BEFORE the text field sees it: a text field turns Enter into a new line.
         public static string ChatBox(string textIn, out bool send, out bool cancel)
         {
             Build();
             send = cancel = false;
             float w = 640f * S, h = 42f * S;
-            var r = new Rect(20f * S, Screen.height - 112f * S, w, h);
+            var r = new Rect(20f * S, Screen.height - 160f * S, w, h);
             Fill(r, new Color(0f, 0.03f, 0.09f, 0.9f));
             Fill(new Rect(r.x, r.yMax - 2f * S, r.width, 2f * S), Pink);
             Text(new Rect(r.x + 10f * S, r.y, 70f * S, h), "SAY>", Pink, 16, TextAnchor.MiddleLeft);
-            var fr = new Rect(r.x + 80f * S, r.y + 4f * S, w - 90f * S, h - 8f * S);
-            GUI.SetNextControlName("chatbox");
-            field.fontSize = Mathf.RoundToInt(18 * S);
-            string t = GUI.TextField(fr, textIn, Chat.MaxText, field);
-            GUI.FocusControl("chatbox");
+            Text(new Rect(r.xMax - 250f * S, r.y, 240f * S, h), "ENTER SEND   ESC CLOSE", CyanDim, 12, TextAnchor.MiddleRight);
+
             var ev = Event.current;
-            if (ev.type == EventType.KeyDown)
-            {
-                if (ev.keyCode == KeyCode.Return || ev.keyCode == KeyCode.KeypadEnter) send = true;
-                if (ev.keyCode == KeyCode.Escape) cancel = true;
-            }
-            return t;
+            int action = ChatKeyAction(ev);
+            if (action != 0) { if (action == 1) send = true; else cancel = true; ev.Use(); return textIn; }
+
+            if (chatField == null) { chatField = Style(18, TextAnchor.MiddleLeft); chatField.normal.textColor = White; chatField.focused.textColor = White; chatField.wordWrap = false; chatField.clipping = TextClipping.Clip; }
+            chatField.fontSize = Mathf.RoundToInt(18 * S);
+            var fr = new Rect(r.x + 80f * S, r.y + 4f * S, w - 340f * S, h - 8f * S);
+            GUI.SetNextControlName("chatbox");
+            string t = GUI.TextField(fr, textIn, Chat.MaxText, chatField);
+            GUI.FocusControl("chatbox");
+            return t.Replace("\n", "").Replace("\r", "");        // a chat message is one line, whatever reaches the box
         }
 
         // Menu-style button: plain cyan text; when hovered the game's pink ">>>" appears in front, like "Resume" in the pause menu.

@@ -359,8 +359,8 @@ static partial class Program
 
         Say("");
         if (undo) Say("Removing the co-op launch option from Steam. Steam has to restart once for that.");
-        else Say("One-time setup: so Steam itself starts the CO-OP copy (not the regular game), Steam has to restart once.");
-        if (!assumeYes && !Confirm("Restart Steam now? [Y/n] ")) { Say("Skipped."); return false; }
+        else Say("The game could not be started directly. To fix that, Steam has to restart once so that it starts the CO-OP copy (not the regular game). This is only needed because the direct start failed.");
+        if (!assumeYes && !Confirm("Restart Steam now? [Y/n] ")) { Say("Skipped. Without this step Steam would start the regular game. Choose Try again and answer Yes when you are ready."); Log("steam setup skipped by the player"); return false; }
         if (Process.GetProcessesByName("steam").Length > 0 && !ShutdownSteam()) { Say("Steam did not close. Close it yourself (Steam menu > Exit), then run this again."); return false; }
 
         string backup = path + ".growhome-coop.bak";
