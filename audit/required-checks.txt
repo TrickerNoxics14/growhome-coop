@@ -50,3 +50,4 @@ LAUNCH-DIRECT-FIRST   | exe    | every account, also one that only borrows the g
 ROOMS                 | game   | public rooms let everybody in, private rooms only players the host accepted, refused players never, unknown mode counts as private, hostile room data and room names are handled safely
 MOUSE-FREE            | game   | while the code box / join window is open the mouse is shown and unlocked so JOIN and CANCEL can be clicked, and the game gets it back afterwards
 GHOST-LEFT            | game   | a player who closed the game (no signal for 6 s) is taken out of the other players worlds, not earlier
+TELEPORTER-SYNC       | game   | switching a teleporter on unlocks it for every player: mine is announced once, a friend's unlocks it here and is not sent back, broken messages are refused

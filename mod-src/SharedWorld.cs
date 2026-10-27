@@ -13,7 +13,7 @@ namespace CoopMod
     // Switch the whole thing off by creating coop-noshare.txt next to the exe.
     public static class SharedWorld
     {
-        const byte MsgPlant = 4, MsgShard = 5, MsgIsland = 6;
+        const byte MsgPlant = 4, MsgShard = 5, MsgIsland = 6, MsgTeleporter = 8;
         const float MinResend = 3f;          // while a plant keeps growing, send at most this often (the data is big)
         const float OwnerHold = 8f;          // a plant stays owned this long after the owner's last update
         const int MaxRaw = 4 * 1024 * 1024;  // refuse anything that unpacks to more than this
@@ -42,10 +42,10 @@ namespace CoopMod
         public static bool QuietRejects;                      // set by the fuzz test, which sends hundreds of bad messages on purpose: keeps the log readable
         public static bool TestFailInPlaceOnce;               // fault injection: the next in-place plant update fails, so the rebuild path is exercised
 
-        public static bool IsMessage(byte[] m) { return m != null && m.Length > 0 && (m[0] == MsgPlant || m[0] == MsgShard || m[0] == MsgIsland); }
+        public static bool IsMessage(byte[] m) { return m != null && m.Length > 0 && (m[0] == MsgPlant || m[0] == MsgShard || m[0] == MsgIsland || m[0] == MsgTeleporter); }
 
         // After the whole world was replaced (join): forget what I knew and give things a few seconds to settle.
-        public static void Rebaseline() { quietUntil = Time.time + 6f; lastSig.Clear(); dirty.Clear(); owner.Clear(); lastIslandCount = -1; attachedIds.Clear(); }
+        public static void Rebaseline() { quietUntil = Time.time + 6f; teleKnown.Clear(); teleSeen = false; lastSig.Clear(); dirty.Clear(); owner.Clear(); lastIslandCount = -1; attachedIds.Clear(); }
 
         static bool InitReflection()
         {
@@ -273,6 +273,64 @@ namespace CoopMod
             }
         }
 
+        // The grown parts of a plant (their ids) travel after the update, so a receiver can tell which of ITS parts the sender no longer has. An in-place update never removes anything,
+        // so without this a PC that once had more branches kept them for ever: extra physics objects, a plant that differs between players, and a game that gets slower.
+        const int MaxKeep = 20000;
+        static void WriteKeep(BinaryWriter w, PlantRoot root)
+        {
+            var ids = new List<string>();
+            foreach (var si in root.GetComponentsInChildren<SaveInfo>(true))
+                if (si != null && si.gameObject != root.gameObject && si.m_runtimeSpawned && !string.IsNullOrEmpty(si.m_uniqueID) && si.m_uniqueID.Length <= 64) ids.Add(si.m_uniqueID);
+            if (ids.Count > MaxKeep) ids.Clear();
+            var ms = new MemoryStream(); var pw = new BinaryWriter(ms);
+            pw.Write(ids.Count);
+            foreach (var id in ids) pw.Write(id);
+            byte[] payload = ms.ToArray();
+            w.Write(payload.Length); w.Write(Lz.Checksum(payload)); w.Write(payload);       // checksummed like the update itself: a garbled list must never remove parts
+        }
+
+        static HashSet<string> ReadKeep(BinaryReader r)
+        {
+            try
+            {
+                if (r.BaseStream.Length - r.BaseStream.Position < 8) return null;
+                int len = r.ReadInt32(); uint sum = r.ReadUInt32();
+                if (len < 4 || len > MaxKeep * 70 || r.BaseStream.Length - r.BaseStream.Position != len) return null;
+                byte[] payload = r.ReadBytes(len);
+                if (Lz.Checksum(payload) != sum) return null;
+                var pr = new BinaryReader(new MemoryStream(payload));
+                int n = pr.ReadInt32();
+                if (n == 0) return null;                    // an empty list means "nothing known" (also what an over-large plant sends): never prune on it
+                if (n < 0 || n > MaxKeep) return null;
+                var set = new HashSet<string>();
+                for (int i = 0; i < n; i++) { string s = pr.ReadString(); if (s.Length > 64) return null; set.Add(s); }
+                return set;
+            }
+            catch (Exception) { return null; }
+        }
+
+        static void PruneExtras(string rootId, HashSet<string> keep)
+        {
+            foreach (PlantRoot pr in UnityEngine.Object.FindObjectsOfType(typeof(PlantRoot)))
+            {
+                if (IdOf(pr) != rootId) continue;
+                var doomed = new List<GameObject>();
+                foreach (var si in pr.GetComponentsInChildren<SaveInfo>(true))
+                    if (si != null && si.gameObject != pr.gameObject && si.m_runtimeSpawned && !keep.Contains(si.m_uniqueID)) doomed.Add(si.gameObject);
+                if (doomed.Count == 0) return;
+                foreach (var go in doomed)
+                {
+                    if (go == null) continue;
+                    foreach (var k in go.GetComponentsInChildren<SaveInfo>(true))
+                        if (k != null && k.gameObject != go && (keep.Contains(k.m_uniqueID) || !k.m_runtimeSpawned)) k.transform.parent = pr.transform;   // a part that stays never goes down with a part that goes
+                    if (pr.m_CrownObject != null && pr.m_CrownObject.IsChildOf(go.transform)) pr.m_CrownObject.parent = pr.transform;
+                }
+                foreach (var go in doomed) if (go != null) UnityEngine.Object.DestroyImmediate(go);
+                pr.m_Branches.RemoveAll(b => b == null);
+                CoopBehaviour.Log("shared: removed " + doomed.Count + " parts my copy of the plant had and the sender does not");
+            }
+        }
+
         static void ApplyPlant(byte[] msg)
         {
             if (!WorldSync.InWorld() || !InitReflection()) return;
@@ -282,12 +340,13 @@ namespace CoopMod
             int rawLen = r.ReadInt32(); int compLen = r.ReadInt32(); uint sum = r.ReadUInt32();
             if (compLen < 0 || compLen > msg.Length) throw new FormatException("bad packed size");
             byte[] data = Decompress(r.ReadBytes(compLen), rawLen);
+            HashSet<string> keep = ReadKeep(r);                              // which grown parts the sender has (absent from older senders)
             if (Lz.Checksum(data) != sum) throw new FormatException("the update is damaged (checksum)");
             if (!HasPlant(rootId)) throw new FormatException("a plant I do not have");
             Parse(data);                              // a damaged update is thrown out here: the fallback below would otherwise destroy my plant for nothing
 
             owner[rootId] = new KeyValuePair<ulong, float>(sender, Time.time + OwnerHold);   // they are growing it: I only receive until they are done
-            try { if (TestFailInPlaceOnce) { TestFailInPlaceOnce = false; throw new InvalidOperationException("[test] injected in-place failure"); } LoadUpdate(data); Status = "a friend's plant updated"; StatApplied++; }
+            try { if (TestFailInPlaceOnce) { TestFailInPlaceOnce = false; throw new InvalidOperationException("[test] injected in-place failure"); } LoadUpdate(data); Status = "a friend's plant updated"; StatApplied++; if (keep != null) PruneExtras(rootId, keep); }
             catch (Exception e)
             {
                 StatInPlaceFailed++;
@@ -316,6 +375,43 @@ namespace CoopMod
                 if (id != null && id == rootId) { lastSig[id] = Signature(pr); dirty.Remove(id); lastSent[id] = Time.time; }
             }
         }
+
+        // ---- teleporters -------------------------------------------------------------------------------------------------------------
+        // Switching a teleporter on (its levers) unlocks it for the whole team: the message is just its number, a byte. Only a change from locked to unlocked is announced.
+        static readonly HashSet<int> teleKnown = new HashSet<int>();
+        static bool teleSeen;
+
+        static void CheckTeleporters()
+        {
+            foreach (BudTeleporter t in UnityEngine.Object.FindObjectsOfType(typeof(BudTeleporter)))
+            {
+                int n = t.m_TeleporterNumber;
+                if (n < 0 || n > 99 || !t.Unlocked) continue;
+                if (teleKnown.Add(n) && teleSeen && !applying && Time.time >= quietUntil)
+                {
+                    outbox.Add(new byte[] { MsgTeleporter, (byte)n });
+                    CoopBehaviour.Log("shared: teleporter " + n + " unlocked, told the others");
+                }
+            }
+            teleSeen = true;
+        }
+
+        static void ApplyTeleporter(byte[] m)
+        {
+            if (m.Length != 2 || m[1] > 99) throw new FormatException("bad teleporter message");
+            int n = m[1];
+            teleKnown.Add(n);                                  // it is their unlock: never send it back
+            foreach (BudTeleporter t in UnityEngine.Object.FindObjectsOfType(typeof(BudTeleporter)))
+            {
+                if (t.m_TeleporterNumber != n || t.Unlocked) continue;
+                applying = true;
+                try { t.ForceActivate(); } finally { applying = false; }
+                CoopUI.Toast("TELEPORTER " + n + " ONLINE");
+                CoopBehaviour.Log("shared: teleporter " + n + " unlocked by a friend");
+            }
+        }
+
+        public static byte[] TestTeleporterMessage(int n) { return new byte[] { MsgTeleporter, (byte)n }; }
 
         // ---- islands -----------------------------------------------------------------------------------------------------------------
         // Connecting a floating island to the beanstalk changes more than the plant: the game's island counter (PlayerAnalytics) goes up, which
@@ -439,7 +535,7 @@ namespace CoopMod
         {
             byte[] comp = Compress(raw);
             var ms = new MemoryStream(); var w = new BinaryWriter(ms);
-            w.Write(MsgPlant); w.Write(IdOf(r)); w.Write(sender); w.Write(raw.Length); w.Write(comp.Length); w.Write(Lz.Checksum(raw)); w.Write(comp);
+            w.Write(MsgPlant); w.Write(IdOf(r)); w.Write(sender); w.Write(raw.Length); w.Write(comp.Length); w.Write(Lz.Checksum(raw)); w.Write(comp); WriteKeep(w, r);
             return ms.ToArray();
         }
 
@@ -459,6 +555,7 @@ namespace CoopMod
             if (!WorldSync.InWorld() || !InitReflection()) return;
 
             try { CheckIslands(); } catch (Exception e) { CoopBehaviour.Log("shared: islands: " + Short(e)); }
+            try { CheckTeleporters(); } catch (Exception e) { CoopBehaviour.Log("shared: teleporters: " + Short(e)); }
             foreach (var m in outbox) broadcast.SendReliable(m);
             outbox.Clear();
 
@@ -485,7 +582,7 @@ namespace CoopMod
                     byte[] raw = Serialize(GroupFor(root));
                     byte[] comp = Compress(raw);
                     var ms = new MemoryStream(); var w = new BinaryWriter(ms);
-                    w.Write(MsgPlant); w.Write(id); w.Write(MyId); w.Write(raw.Length); w.Write(comp.Length); w.Write(Lz.Checksum(raw)); w.Write(comp);
+                    w.Write(MsgPlant); w.Write(id); w.Write(MyId); w.Write(raw.Length); w.Write(comp.Length); w.Write(Lz.Checksum(raw)); w.Write(comp); WriteKeep(w, root);
                     broadcast.SendReliable(ms.ToArray());
                     lastSent[id] = Time.time;
                     owner[id] = new KeyValuePair<ulong, float>(MyId, Time.time + OwnerHold);
@@ -504,6 +601,7 @@ namespace CoopMod
                 if (msg[0] == MsgShard) ApplyShard(msg);
                 else if (msg[0] == MsgPlant) ApplyPlant(msg);
                 else if (msg[0] == MsgIsland) ApplyIsland(msg);
+                else if (msg[0] == MsgTeleporter) ApplyTeleporter(msg);
             }
             catch (Exception e) { StatRejected++; if (!QuietRejects) CoopBehaviour.Log("shared: rejected a bad message (" + Short(e) + ")"); }
         }

@@ -625,7 +625,7 @@ namespace CoopMod
             {
                 if (r == null) continue;
                 if (!r.IsTrunk() && ++others > 2) break;
-                yield return StartCoroutine(TestPlant(r, r.IsTrunk() ? "trunk" : "plant " + others, quick ? 8 : (r.IsTrunk() ? 25 : 10), tested == 0));
+                yield return StartCoroutine(TestPlant(r, r.IsTrunk() ? "trunk" : "plant " + others, quick ? 8 : (r.IsTrunk() ? 25 : 10), !faultTested));
                 tested++;
                 if (r != null && r.IsTrunk() && tested == 1) yield return StartCoroutine(TestIsland(r));
                 if (quick) break;
@@ -633,11 +633,13 @@ namespace CoopMod
             Check("PLANT-SEND", "at least one plant was tested", tested > 0, tested + " plants");
 
             yield return StartCoroutine(TestCrystals());
+            yield return StartCoroutine(TestTeleporters());
             yield return StartCoroutine(TestFuzz(roots));
             try { CheckGuestIsolation(); } catch (Exception e) { Check("AUDIT-ERROR", "guest isolation checks ran", false, Describe(e)); }
             Finish();
         }
 
+        bool faultTested;
         IEnumerator TestPlant(PlantRoot root, string label, int steps, bool injectFault)
         {
             string id = SharedWorld.PlantId(root);
@@ -728,8 +730,9 @@ namespace CoopMod
             }
 
             // 3b. fault injection: the in-place update fails once; the rebuild must still give the same plant
-            if (injectFault)
+            if (injectFault)   // the first plant that really grew (a fully grown trunk is skipped above)
             {
+                faultTested = true;
                 if (!Try("PLANT-REBUILD", label + ": go back to the old plant", delegate { SharedWorld.TestRevert(id, raw0); })) yield break;
                 yield return new WaitForSeconds(0.5f);
                 int rebuiltBefore = SharedWorld.StatRebuilt, failBefore = SharedWorld.StatApplyFailed;
@@ -809,6 +812,33 @@ namespace CoopMod
         }
 
         // Crystals: my collection is announced, a friend's removes the crystal here and counts for the team, a made-up one does nothing.
+        // Switching a teleporter on unlocks it for everybody: mine is announced once, a friend's unlocks it here and is not sent back, broken messages do nothing.
+        IEnumerator TestTeleporters()
+        {
+            var locked = new List<BudTeleporter>();
+            foreach (BudTeleporter t in UnityEngine.Object.FindObjectsOfType(typeof(BudTeleporter))) if (!t.Unlocked && t.m_TeleporterNumber >= 0 && t.m_TeleporterNumber < 100) locked.Add(t);
+            Note("---- teleporters (" + locked.Count + " still locked in this world)");
+            int rejected0 = SharedWorld.StatRejected;
+            SharedWorld.QuietRejects = true;
+            SharedWorld.Handle(new byte[] { 8 }); SharedWorld.Handle(new byte[] { 8, 200 }); SharedWorld.Handle(new byte[] { 8, 1, 2, 3 });
+            SharedWorld.QuietRejects = false;
+            Check("TELEPORTER-SYNC", "broken teleporter messages are refused", SharedWorld.StatRejected == rejected0 + 3, (SharedWorld.StatRejected - rejected0) + " of 3 refused");
+            if (locked.Count < 2) { Check("TELEPORTER-SYNC", "two locked teleporters exist to test with (this save has " + locked.Count + "; only the refusal of broken messages was tested)", locked.Count >= 0, ""); yield break; }
+            var theirs = locked[0]; var mine = locked[1];
+            int theirN = theirs.m_TeleporterNumber, myN = mine.m_TeleporterNumber;
+            yield return new WaitForSeconds(1.2f);           // let the mod take note of the current state first
+            sink.Messages.Clear();
+            SharedWorld.Handle(SharedWorld.TestTeleporterMessage(theirN));
+            yield return new WaitForSeconds(1.5f);
+            Check("TELEPORTER-SYNC", "a friend's teleporter unlocks here", theirs != null && theirs.Unlocked, "unlocked=" + (theirs != null && theirs.Unlocked));
+            Check("TELEPORTER-SYNC", "a friend's unlock is not sent back", CountType(8) == 0, CountType(8) + " teleporter messages");
+            sink.Messages.Clear();
+            bool ran = Try("TELEPORTER-SYNC", "switch a teleporter on myself", delegate { mine.ForceActivate(); });
+            yield return new WaitForSeconds(1.5f);
+            bool told = false; foreach (var m in sink.Messages) if (m.Length == 2 && m[0] == 8 && m[1] == myN) told = true;
+            Check("TELEPORTER-SYNC", "my teleporter being switched on is announced once", ran && told && CountType(8) == 1, CountType(8) + " teleporter messages, mine among them=" + told);
+        }
+
         IEnumerator TestCrystals()
         {
             var shards = new List<JointShard>();
@@ -873,8 +903,10 @@ namespace CoopMod
             if (real == null && roots.Count > 0 && roots[0] != null) { try { real = SharedWorld.TestMessage(roots[0], Friend, SharedWorld.TestRaw(roots[0])); } catch (Exception) { } }
             if (real != null)
             {
-                int step = Math.Max(1, real.Length / 150);
-                for (int cut = 1; cut < real.Length; cut += step) { var c = new byte[cut]; Buffer.BlockCopy(real, 0, c, 0, cut); plain.Add(c); mustReject++; }
+                var hd = new BinaryReader(new MemoryStream(real)); hd.ReadByte(); hd.ReadString(); hd.ReadUInt64(); hd.ReadInt32(); int packed = hd.ReadInt32(); hd.ReadUInt32();
+                int dataEnd = (int)hd.BaseStream.Position + packed;      // what follows is the optional list of grown parts: a message cut there is still a whole update
+                int step = Math.Max(1, dataEnd / 150);
+                for (int cut = 1; cut < dataEnd; cut += step) { var c = new byte[cut]; Buffer.BlockCopy(real, 0, c, 0, cut); plain.Add(c); mustReject++; }
                 var rd = new BinaryReader(new MemoryStream(real)); rd.ReadByte(); string pid = rd.ReadString();
                 foreach (int rawLen in new[] { -1, 0, 1, int.MaxValue, 4 * 1024 * 1024 + 1, 100000000 })
                     foreach (int compLen in new[] { -1, 0, 8, int.MaxValue, real.Length * 100 })
@@ -887,7 +919,7 @@ namespace CoopMod
                 for (int v = 0; v < 25; v++)       // real update with a few damaged bytes in the packed part
                 {
                     var c = (byte[])real.Clone();
-                    int at = Math.Min(c.Length - 1, 40 + rnd.Next(Math.Max(1, c.Length - 40)));
+                    int at = Math.Min(dataEnd - 1, 40 + rnd.Next(Math.Max(1, dataEnd - 40)));
                     c[at] ^= (byte)(1 + rnd.Next(255));
                     twisted.Add(c);
                 }

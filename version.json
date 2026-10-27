@@ -1,7 +1,7 @@
 ﻿{
-    "version":  4,
+    "version":  5,
     "dll":  "https://raw.githubusercontent.com/TrickerNoxics14/growhome-coop/main/CoopMod.dll",
-    "sha256":  "90253f37b802e4c1f4311024a90d84768d0a362f1b328833f9a66168470117e8",
-    "notes":  "Rooms (public, listed with host approval, private), join list, chat fixes, player names, mouse and menu fixes, players who leave disappear, safer room rules",
-    "signature":  "Ib23Mj39JAdUi9CXoVmUPrh/wq1vhmsweUL40SsLg42MG98HuxrtHV3XcG0KAasvgvqeF2/JHa0ktf6K8StEldINvwW5inVRVgE9u/TKPCkxA21rGIM7wUdGcGCIuQOrX9XanmvUiTg6U9Qef2tJOQIOgrs+OuKAhpoEjepXGObNvYJK/BjR/zmzyXzussZNkbItFfIyUmokMJtMyN00wL47z6aokPrgE9HOLW7/tNoKw318pYbVmZBi5GQ1NzVuiFF9PREYCjqfkCpflfAu/RVvvOWoFLnw69gOGaiAdaokD2U4Hc09JYFKcAttEhe/juLu9l5lIBATfkcmMsT/7xPmPo5j4eoo9JrgabbQG+zUatiw48rk7bMATiUVBifkFfOL94rNNeB7FdVVYZ3wi+C3sDQRJ5hapVfoiqmTeN12i3oNk5kRLEDihYHIn07Y7oeiKOc5+Cso/UAqIZ0NlR2EckyIJ6IlyzcoAIciwSvHZ83gpWV8hVjJsx7CSd79"
+    "sha256":  "4da477b1f61e23af31dd4fc4d20fd007a0f5f0f86a8d74f6a24c6fd671a491b6",
+    "notes":  "Version 5: rooms (public, listed with host approval, private), join list, chat fixes, names, mouse and menu fixes, players who leave disappear, safer room rules, plant parts removed when they are gone, teleporters unlock for everybody",
+    "signature":  "sYgJj1jhBOSDYtkPTJWbXBJytBtJZKzqI1ZVsdfoevIoA4oofhLlJzTWq6FeY4ap3ZaXo3/yy7vljmOc2md5fia2hKyjwsAiIex2Ws6YCwLO1CXV6xGKgQ+WzGr3kQboHaTq1Ch9YpjqUzQya3Sf8LvbfyiRWHZzpU6AGMcEp9HW1yXpJHBBta2jO8gbOqW3gGDsbcEsKDw/ICBveEjUYT08aKknh4+yAeVeg2gzAJpGEqVaXi4tZsE3XAQeMm89+4DEVtCRSLBiA0C1Up+5DhrTNU7KxgHQ4xjg/k8jLYWKkxbs/8hnuas8V/y1+4vyDMf/W2FhjDj3ACTRYUoi8EJypnx0ZSQL7+2B/JESbACINUJu3VW28DHW1NzMSRKBW6zCBAKqBkPhFLWQVUl0SAq2n0PG2JB0BVI/4vjKxmN8Kr8uiqHEIBgJtGCckC62x47wTDeE/LHOOK5/vM2NNsSR3kgDTDzonRTRHrFVHAWj3pqLrcj6U0L/KBXIhiQ0"
 }

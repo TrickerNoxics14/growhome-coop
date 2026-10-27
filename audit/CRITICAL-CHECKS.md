@@ -92,3 +92,4 @@ It never publishes anything: pushing a new version to GitHub for friends is a se
 | ROOMS | game | public rooms (listed, anyone joins) and private rooms (code + host accepts each player with Y/N) | pure rule checks with hostile data |
 | MOUSE-FREE | game | the mouse works in the code box and room menus | the real mod frees the cursor against a game that locks it |
 | GHOST-LEFT | game | a player who left does not stay standing in the world | the 6-second rule and the real removal of the copy |
+| TELEPORTER-SYNC | game | a teleporter one player switches on is unlocked for everybody | the real teleporters of the world, both directions, echo and bad messages |
