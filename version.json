@@ -1,7 +1,7 @@
 ﻿{
-    "version":  6,
+    "version":  7,
     "dll":  "https://raw.githubusercontent.com/TrickerNoxics14/growhome-coop/main/CoopMod.dll",
-    "sha256":  "39a2eaa763de1761b04b73b7166df759ff285112ede739ae920d785c75b1e98d",
-    "notes":  "Security fixes (room host and room talk rules, sender credit, safe Steam Cloud names) and a bigger settings menu: on-screen display, name tags, chat log, share world and the room for F2.",
-    "signature":  "n/ukMKGWDlvtfg6kHZnSfre5P/OYhh7WxqBDcCGc4vga+lN2wPR0+9ju7IifXvZ/+3h3/gfZfGx4ZO0ApqL6U8Hojv0M1p7GT9Sq0/p+GFlUGlikFVkgaMVNEPXvRBbCqnAcTvriFefxYGXysx7aZMMuhU/GnTHGGj43MOexmxyAbsUjVpkAnarO+IDaLckKt3G0W2pgwz+IDteTtMdDdIc8HrhGtzZkYjrHJYC5CG3ONJmGzQId2TreNN12xIDerTwtTfEru7eyfjGRqLYFy1nV1KVaBn/51baNY4pwNRuxoH0bl12WJyJ86RqGzGjy4BpK6B1hQjE7ynhZHbPPydt8oMoE3/zhvyNVLs70MrqXPj4HUSLScY7J9TpCBW0NySIfZ0/R3398VGLzIzv9qvwCJraKU//3ZtivusKWbA6sPey4GqPhmuQWQIjbyppfKnSbQLRdXPM46vFuLzm1Js7AX9Du4lSF6cGL5i2KUZ/psU0y1oP5RQ109ttwcjl0"
+    "sha256":  "c869cb44c93832152f0c26e161df3cbf3aafd99dd2f12ad171d8fd339c1eac32",
+    "notes":  "Camera fix for the host: a friend\u0027s plant update waits while my walkster stands on that plant, so the plant is no longer rebuilt under the camera; applied as soon as I step off.",
+    "signature":  "ZvcB/tJdJW0ChiDW6nYsepZivPDWnFrGWK+VahpQJYBfMBlneZI8hfr62wYsOk6rxImU1tulhR3GSS+cuMMScb0oRw7n6zIBvulxzCiHBPcb0cO0ZXs4zBA61aPIYmxjaYD2i4DXfqEhzGTjE0q1j4GvEaervK6PH+HB2gH3w1jmXpdKFTxu4+XA+m/TwYMDcgKGTY0D9gXUMIsBA9+PPbAqJ64Oqr907dt5/Smapb0ob6MR9uxmMIOSgJ0Ce+6H6BIt9p2qibz50JJJra8+rsbLee1I4Zfj+C43BMXE5tQ7y2bG1II6XksK9DSpVg3LNDHnPuU3oL0wHGHgWA8xrmImB2kXQBKS11+rz1/hFfKucJHi1WCGf1NeC6GASB/u4V4tvWu/FvgmzL7KjW9agLNlL3tpFtHPLa1kKQQ7kr6p+M6dZ+4CR+5zJguv3k/pvdbruCwpE8QP96eOOQ0wpTOsZqc7SKQRfxa+tDf9LmQYNsnhfbq8YBVgflj4h4FK"
 }

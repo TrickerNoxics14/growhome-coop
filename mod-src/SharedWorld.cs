@@ -15,6 +15,7 @@ namespace CoopMod
     {
         const byte MsgPlant = 4, MsgShard = 5, MsgIsland = 6, MsgTeleporter = 8;
         const float MinResend = 3f;          // while a plant keeps growing, send at most this often (the data is big)
+        const float NearPlant = 4f;          // my walkster this close to a part of a plant counts as standing on it: updates to that plant wait
         const float OwnerHold = 8f;          // a plant stays owned this long after the owner's last update
         const int MaxRaw = 4 * 1024 * 1024;  // refuse anything that unpacks to more than this
         const int MaxIslands = 60;           // sanity limit for the island counter in a friend's message
@@ -35,6 +36,9 @@ namespace CoopMod
         static readonly HashSet<string> dirty = new HashSet<string>();
         static readonly List<byte[]> outbox = new List<byte[]>();
         static float nextCheck, lastPlantToast;
+        // a friend update that arrived while my walkster stood on that plant: it waits until I step off (only the latest is kept: every update is the whole plant)
+        static readonly Dictionary<string, KeyValuePair<ulong, byte[]>> waiting = new Dictionary<string, KeyValuePair<ulong, byte[]>>();
+        public static bool? TestPlayerOnPlant;                // fault injection: null = measure where my walkster is; true/false = pretend it is or is not on the plant
 
         // counters and hooks for the automated self test (SelfTest.cs); harmless in normal play
         public static ITransport TestSink;                    // when set, plant updates go here instead of to the network
@@ -229,6 +233,35 @@ namespace CoopMod
             return null;
         }
 
+        // Is my walkster standing on (or climbing) this plant? The camera follows its grip on the branches, so a plant it stands on is not rebuilt under it.
+        static bool OnPlant(string rootId)
+        {
+            if (TestPlayerOnPlant.HasValue) return TestPlayerOnPlant.Value;
+            var me = GameObject.Find("Walkster");
+            if (me == null) return false;
+            foreach (PlantRoot pr in UnityEngine.Object.FindObjectsOfType(typeof(PlantRoot)))
+            {
+                if (IdOf(pr) != rootId) continue;
+                foreach (var t in pr.GetComponentsInChildren<Transform>(true))
+                    if ((t.position - me.transform.position).sqrMagnitude < NearPlant * NearPlant) return true;
+                return false;
+            }
+            return false;
+        }
+
+        // Applies the waited updates of the plants I have stepped off.
+        static void ApplyWaiting()
+        {
+            foreach (var id in new List<string>(waiting.Keys))
+            {
+                if (OnPlant(id)) continue;
+                var w = waiting[id];
+                waiting.Remove(id);
+                try { ApplyPlant(w.Value, w.Key); CoopBehaviour.Log("shared: applied a friend plant update that waited while I stood on the plant"); }
+                catch (Exception e) { StatRejected++; CoopBehaviour.Log("shared: a waited plant update failed (" + Short(e) + ")"); }
+            }
+        }
+
         // One try at loading a plant update into the scene. Everything not in the update keeps its state.
         static void LoadUpdate(byte[] data)
         {
@@ -346,6 +379,7 @@ namespace CoopMod
             Parse(data);                              // a damaged update is thrown out here: the fallback below would otherwise destroy my plant for nothing
 
             owner[rootId] = new KeyValuePair<ulong, float>(sender, Time.time + OwnerHold);   // they are growing it: I only receive until they are done
+            if (OnPlant(rootId)) { waiting[rootId] = new KeyValuePair<ulong, byte[]>(from, msg); if (!QuietRejects) CoopBehaviour.Log("shared: a friend plant update waits until I step off that plant"); return; }   // the owner is already set above, so my copy stays quiet meanwhile
             try { if (TestFailInPlaceOnce) { TestFailInPlaceOnce = false; throw new InvalidOperationException("[test] injected in-place failure"); } LoadUpdate(data); Status = "a friend's plant updated"; StatApplied++; if (keep != null) PruneExtras(rootId, keep); }
             catch (Exception e)
             {
@@ -541,6 +575,8 @@ namespace CoopMod
 
         public static void TestApply(byte[] msg) { ApplyPlant(msg, 0UL); }
         public static void TestRevert(string rootId, byte[] raw) { InitReflection(); RemovePlantCopy(rootId); LoadUpdate(raw); }
+        public static void TestApplyWaiting() { ApplyWaiting(); }
+        public static int TestWaiting { get { return waiting.Count; } }
         public static void TestForget(string rootId) { owner.Remove(rootId); lastSig.Remove(rootId); lastSent.Remove(rootId); dirty.Remove(rootId); }
 
         public static void Tick(ITransport broadcast)
@@ -554,6 +590,7 @@ namespace CoopMod
             nextCheck = Time.time + 0.5f;
             if (!WorldSync.InWorld() || !InitReflection()) return;
 
+            ApplyWaiting();
             try { CheckIslands(); } catch (Exception e) { CoopBehaviour.Log("shared: islands: " + Short(e)); }
             try { CheckTeleporters(); } catch (Exception e) { CoopBehaviour.Log("shared: teleporters: " + Short(e)); }
             foreach (var m in outbox) broadcast.SendReliable(m);

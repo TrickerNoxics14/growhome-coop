@@ -659,6 +659,7 @@ namespace CoopMod
         {
             string id = SharedWorld.PlantId(root);
             Note("---- " + label + " " + id);
+            SharedWorld.TestPlayerOnPlant = false;   // the rules above are about updates; the walkster-on-plant rule has its own check (PLANT-DEFER)
             byte[] raw0 = null; int sig0 = 0;
             if (!Try("AUDIT-ERROR", label + ": read starting state", delegate { raw0 = SharedWorld.TestRaw(root); sig0 = SharedWorld.PlantSignature(root); })) yield break;
             Note(label + ": starting state " + raw0.Length + " bytes; " + Facts(root));
@@ -759,6 +760,23 @@ namespace CoopMod
                 int sigNow = SharedWorld.PlantSignature(root);
                 Check("PLANT-REBUILD", label + ": the rebuild path was used", SharedWorld.StatRebuilt == rebuiltBefore + 1 && SharedWorld.StatApplyFailed == failBefore, "rebuilt " + (SharedWorld.StatRebuilt - rebuiltBefore) + " time(s), failures " + (SharedWorld.StatApplyFailed - failBefore));
                 Check("PLANT-REBUILD", label + ": the rebuilt plant equals the sender's", sigNow == sigFinal, "sender: " + factsFinal + " | receiver: " + Facts(root) + " | " + Diff(partsFinal, ObjectNames(root)));
+
+                // 3c. my walkster stands on the plant: a friend update waits until it steps off, then lands
+                if (!Try("PLANT-DEFER", label + ": go back to the old plant", delegate { SharedWorld.TestRevert(id, raw0); })) yield break;
+                yield return new WaitForSeconds(0.5f);
+                yield return new WaitForSeconds(4f);   // the revert's load can finish a few frames late: let it settle before taking the baseline
+                int oldSig = SharedWorld.PlantSignature(root);
+                byte[] waitMsg = WithSender(mine[mine.Count - 1], Friend);
+                SharedWorld.TestPlayerOnPlant = true;
+                Try("PLANT-DEFER", label + ": update while I stand on the plant", delegate { SharedWorld.TestApply(waitMsg); });
+                yield return new WaitForSeconds(1f);
+                bool held = SharedWorld.PlantSignature(root) == oldSig && SharedWorld.TestWaiting == 1;
+                Check("PLANT-DEFER", label + ": the update waits while I stand on the plant", held, "before " + oldSig + ", now " + SharedWorld.PlantSignature(root) + ", unchanged " + (SharedWorld.PlantSignature(root) == oldSig) + ", waiting: " + SharedWorld.TestWaiting);
+                SharedWorld.TestPlayerOnPlant = false;
+                SharedWorld.TestApplyWaiting();
+                yield return new WaitForSeconds(4f);
+                Check("PLANT-DEFER", label + ": once I step off, the waiting update lands and the plant equals the sender's", SharedWorld.PlantSignature(root) == sigFinal && SharedWorld.TestWaiting == 0, "sender: " + factsFinal + " | receiver: " + Facts(root) + " | " + Diff(partsFinal, ObjectNames(root)));
+                SharedWorld.TestPlayerOnPlant = null;
             }
 
             // 4. while a friend is growing it I stay quiet; afterwards I may send again

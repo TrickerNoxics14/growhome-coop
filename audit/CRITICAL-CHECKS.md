@@ -33,6 +33,7 @@ Where they run: **game** = inside the real game, using the real send/receive cod
 | PLANT-SIZE | game | one update stays under 100 KB and takes under 60 ms to make | measures the largest update and the time to serialise + compress it |
 | PLANT-CONVERGE | game | a copy that only has an older plant ends up identical (parts, branches, length, islands counter) | rewinds the plant to its old state, plays the updates in, compares |
 | PLANT-REBUILD | game | when updating in place fails, the fallback rebuild still gives the identical plant | injects one failure into the in-place path |
+| PLANT-DEFER | game | while my walkster stands on a plant, a friend update waits and lands once I step off | runs an update with the walkster on the plant, then off it |
 | PLANT-NOLEAK | game | sending plants does not pile up the game's after-load callbacks | counts the game's queued callbacks before and after many sends |
 | PLANT-OWNER | game | a received plant is never echoed back; a plant a friend is growing is not overwritten; sending resumes afterwards | simulates a friend's update, then grows locally and watches what is sent |
 | ISLAND-ATTACH | game | an island a friend connected shows as connected here | applies a friend's plant update on a copy that does not know the island |
