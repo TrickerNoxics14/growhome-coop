@@ -175,6 +175,7 @@ static partial class Program
         DateTime closeAt = DateTime.MaxValue;
         public int ExitCode;
         public int AskGraceMs = 900;           // a question ignores keys and clicks for this long, so a key still held down or a double click cannot answer it unseen
+        public Point AskMouse { get { return askMouse; } }   // the audit's resting-mouse check measures from here, not from the real cursor (which a person may move at any time)
         DateTime askShownAt = DateTime.MinValue; Point askMouse;      // where the mouse sat when the question appeared
         readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 33 };
         readonly bool testing;

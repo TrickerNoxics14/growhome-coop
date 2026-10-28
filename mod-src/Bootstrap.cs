@@ -41,6 +41,8 @@ namespace CoopMod
 
         // misc
         float lastHitchLog;
+        int gcSeen0, gcSeen2;
+        float nextLockCheck; bool lastLocked;
         static string logName = "coopmod.log";
 
         // Steam starts the game with its working directory set to the original install, so anchor files to the running exe's folder.
@@ -157,8 +159,11 @@ namespace CoopMod
             if (frameDt > 0.08f && Online && Time.time > 10f && Time.time - lastHitchLog > 1f)
             {
                 lastHitchLog = Time.time;
-                Log("hitch: frame took " + (frameDt * 1000f).ToString("F0") + " ms; my mod used " + Perf.LastFrameMs.ToString("F1") + " ms in the frame before (heaviest: " + Perf.LastHeavy + " " + Perf.LastHeavyMs.ToString("F1") + " ms)");
+                int g0 = GC.CollectionCount(0), g2 = GC.CollectionCount(2);
+                Log("hitch: frame took " + (frameDt * 1000f).ToString("F0") + " ms; my mod used " + Perf.LastFrameMs.ToString("F1") + " ms in the frame before (heaviest: " + Perf.LastHeavy + " " + Perf.LastHeavyMs.ToString("F1") + " ms); garbage collections since the last hitch line: " + (g0 - gcSeen0) + " (full " + (g2 - gcSeen2) + "), heap " + (GC.GetTotalMemory(false) >> 20) + " MB");
+                gcSeen0 = g0; gcSeen2 = g2;
             }
+            WatchLock();
             SaveGuard.Tick();
             if (Online && AnyConnected) ResumeAfterFocusLoss();
             if (Input.GetKeyDown(KeyCode.F7) && Online) PullWorld();
@@ -1091,6 +1096,23 @@ namespace CoopMod
             if (testPeer == null) testPeer = new Peer { Number = 2 };
             if (testPeer.Clone != null) { Destroy(testPeer.Clone); testPeer.ClearClone(); Log("test copy removed"); return; }
             SpawnClone(testPeer, null);
+        }
+
+        // For the self test: a copy of another player, made the same way the game makes one.
+        public void TestSpawnCopy(Peer p, Vector3 at) { SpawnClone(p, at); }
+
+        // Diagnostic for the frozen-walkster reports: logs when my walkster is put into or taken out of the kinematic climb lock, and where it is.
+        void WatchLock()
+        {
+            if (Time.time < nextLockCheck) return;
+            nextLockCheck = Time.time + 0.25f;
+            var me = GameObject.Find("Walkster");
+            var c = me == null ? null : me.GetComponent<Controllable>();
+            if (c == null || c.body == null) return;
+            bool locked = c.body.isKinematic;
+            if (locked == lastLocked) return;
+            lastLocked = locked;
+            Log("local walkster " + (locked ? "LOCKED (kinematic, a branch holds it)" : "free again") + " at " + c.body.position);
         }
 
         void SpawnClone(Peer p, Vector3? at)

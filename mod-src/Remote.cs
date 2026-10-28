@@ -161,10 +161,13 @@ namespace CoopMod
             }
         }
 
+        // A remote player never grabs anything in my world. Its hands would pull on the plant I stand on, and the game assumes one set of hands (mine):
+        // a grab by the copy makes MY walkster hang on that branch (PlantBranch.HandleGrabFlex) and points MY camera at it (PlantControlNub.OnRelease).
         void Grab(int i, bool want)
         {
             var h = hands.hand[i];
-            if (h.released) h.released = want; else h.grabbing = want;
+            h.grabbing = false;
+            h.released = false;
         }
 
         void Jump()

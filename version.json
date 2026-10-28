@@ -1,7 +1,7 @@
 ﻿{
-    "version":  7,
+    "version":  8,
     "dll":  "https://raw.githubusercontent.com/TrickerNoxics14/growhome-coop/main/CoopMod.dll",
-    "sha256":  "c869cb44c93832152f0c26e161df3cbf3aafd99dd2f12ad171d8fd339c1eac32",
-    "notes":  "Camera fix for the host: a friend\u0027s plant update waits while my walkster stands on that plant, so the plant is no longer rebuilt under the camera; applied as soon as I step off.",
-    "signature":  "ZvcB/tJdJW0ChiDW6nYsepZivPDWnFrGWK+VahpQJYBfMBlneZI8hfr62wYsOk6rxImU1tulhR3GSS+cuMMScb0oRw7n6zIBvulxzCiHBPcb0cO0ZXs4zBA61aPIYmxjaYD2i4DXfqEhzGTjE0q1j4GvEaervK6PH+HB2gH3w1jmXpdKFTxu4+XA+m/TwYMDcgKGTY0D9gXUMIsBA9+PPbAqJ64Oqr907dt5/Smapb0ob6MR9uxmMIOSgJ0Ce+6H6BIt9p2qibz50JJJra8+rsbLee1I4Zfj+C43BMXE5tQ7y2bG1II6XksK9DSpVg3LNDHnPuU3oL0wHGHgWA8xrmImB2kXQBKS11+rz1/hFfKucJHi1WCGf1NeC6GASB/u4V4tvWu/FvgmzL7KjW9agLNlL3tpFtHPLa1kKQQ7kr6p+M6dZ+4CR+5zJguv3k/pvdbruCwpE8QP96eOOQ0wpTOsZqc7SKQRfxa+tDf9LmQYNsnhfbq8YBVgflj4h4FK"
+    "sha256":  "95ceae9199f544243cf8715b86ae473935cf913254f0eb86e77ee148c3fca929",
+    "notes":  "Fixes the frozen walkster and camera jumps: remote copies no longer grab plant parts, object sync no longer moves plant parts or jointed bodies, and the PhysX velocity warnings are gone; the log now records walkster locks and garbage collections on hitches.",
+    "signature":  "YvmCEaJz58fzvdyd3aYsvDCvNdff7MvjkiSE6OWCns+hF+VSw8GFZWGB1m/MpVdwTYX6sdIvmUMvM7bwwajmOc7SSbftF06Y7shNcuixjG+t4oAPyHomytImYXuPnocJW+dDxRa8eN8682XPYXVRQD2AEzW0WMW92AGtAwcaPWtVBeTT5MqOWaSYIqH7hw4OfdZ0IhbWLa/foomuZbimCGBncsXTN4vy8yhX9YF8CQc9dfA62d3JDg7m77vXSgsrV+9ThgT1wsVVMHc6sGmA+H3Q8PHJVaX8UwAX9O2cWyKxdVuFyZxK/CHI2KoXJ7+fRpKWr4Mhz1lTGzgWkL2gXU3T8dQYFgXW3bnaFsuPOhDlcPAmm3JlMQq1ixZPkTyfzTM0xniwUVaHIfvBf5QfpXL9F6MKyjvfyGUeGMSzDb3j2tNSK2qXsJl1luH9rmRzYl2KOav0D7Ji93KqfY/JXssPH04nXLyipOIGLhPhIF1+7ciErytjYisM4PKj90V9"
 }

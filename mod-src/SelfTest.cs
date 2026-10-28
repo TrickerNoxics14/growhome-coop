@@ -649,6 +649,7 @@ namespace CoopMod
 
             yield return StartCoroutine(TestCrystals());
             yield return StartCoroutine(TestTeleporters());
+            yield return StartCoroutine(TestRemoteCopy());
             yield return StartCoroutine(TestFuzz(roots));
             try { CheckGuestIsolation(); } catch (Exception e) { Check("AUDIT-ERROR", "guest isolation checks ran", false, Describe(e)); }
             Finish();
@@ -846,6 +847,48 @@ namespace CoopMod
 
         // Crystals: my collection is announced, a friend's removes the crystal here and counts for the team, a made-up one does nothing.
         // Switching a teleporter on unlocks it for everybody: mine is announced once, a friend's unlocks it here and is not sent back, broken messages do nothing.
+        // A remote player's copy must never grab anything in my world (its hands would pull on my plant and lock my walkster to the branch), and a friend's
+        // held-object packet must never move a plant part: the plant is synced by its own updates only.
+        IEnumerator TestRemoteCopy()
+        {
+            PlantBranch branch = null;
+            foreach (PlantRoot r in UnityEngine.Object.FindObjectsOfType(typeof(PlantRoot)))
+            {
+                foreach (var b in r.m_Branches) if (b != null) { branch = b; break; }
+                if (branch != null) break;
+            }
+            var host = UnityEngine.Object.FindObjectOfType(typeof(CoopBehaviour)) as CoopBehaviour;
+            if (branch == null || host == null) { Check("REMOTE-NO-GRAB", "a plant branch and the mod exist to test with", false, "branch=" + (branch != null) + " host=" + (host != null)); yield break; }
+            var peer = new Peer { Id = 7777UL, Number = 3 };
+            host.TestSpawnCopy(peer, branch.transform.position + Vector3.right * 1.5f);
+            if (peer.Clone == null || peer.Driver == null) { Check("REMOTE-NO-GRAB", "a copy of another player can be made for the test", false, "no copy"); yield break; }
+            peer.Driver.useKeyboard = false;
+            peer.Driver.input.leftGrab = true; peer.Driver.input.rightGrab = true;
+            var hands = peer.Driver.GetComponent<BipedHandsScript>();
+            bool grabbed = false;
+            for (int i = 0; i < 30; i++)
+            {
+                yield return new WaitForSeconds(0.1f);
+                if (hands == null) break;
+                for (int h = 0; h < 2; h++) if (hands.hand[h].grabbing || hands.hand[h].grabbedObject != null) grabbed = true;
+            }
+            Check("REMOTE-NO-GRAB", "a copy told to grab never grabs anything in my world", hands != null && !grabbed, hands == null ? "no hands on the copy" : (grabbed ? "a hand grabbed something" : "no hand grabbed"));
+            peer.Driver.input.leftGrab = false; peer.Driver.input.rightGrab = false;
+            Destroy(peer.Clone);
+            peer.ClearClone();
+
+            Rigidbody part = null;
+            foreach (Rigidbody rb in UnityEngine.Object.FindObjectsOfType(typeof(Rigidbody)))
+                if (rb.GetComponentInParent<PlantRoot>() != null && (part == null || (part.isKinematic && !rb.isKinematic))) part = rb;
+            if (part == null) { Check("PLANT-PART-STEER", "a plant part exists to test with", false, "none"); yield break; }
+            Vector3 start = part.position;
+            ObjectSync.SetRemoteHeld(7778UL, new PlayerState.Held[] { new PlayerState.Held { id = ObjectSync.KeyOf(part), pos = start + Vector3.right * 6f, rot = part.rotation, vel = Vector3.zero } });
+            for (int i = 0; i < 5; i++) ObjectSync.FixedTick();
+            yield return new WaitForFixedUpdate();
+            float moved = (part.position - start).magnitude;
+            Check("PLANT-PART-STEER", "a friend's held-object packet never moves a plant part (the plant is synced by its own updates only)", moved < 0.05f, "moved " + moved.ToString("F2") + " m");
+        }
+
         IEnumerator TestTeleporters()
         {
             var locked = new List<BudTeleporter>();

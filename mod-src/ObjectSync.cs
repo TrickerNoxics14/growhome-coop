@@ -31,6 +31,15 @@ namespace CoopMod
 
         static bool IsPlayerPart(Transform t) { return t.root != null && t.root.name.StartsWith("Walkster"); }
 
+        // Plant parts (stems, nubs, leaves, buds) and anything jointed. The plant is synced by its own updates; steering these bodies moves the branch
+        // the walkster stands on (in the logs a friend's BigLeaf was pulled across the plant onto my copy, and the branch moved under my walkster).
+        static int beanstalkLayer = -2;
+        static bool IsPlantPart(Rigidbody rb)
+        {
+            if (beanstalkLayer == -2) beanstalkLayer = LayerMask.NameToLayer("Beanstalk");
+            return rb.gameObject.layer == beanstalkLayer || rb.GetComponentInParent<PlantRoot>() != null || rb.GetComponent<Joint>() != null;
+        }
+
         // Scene-hierarchy path with sibling indices, e.g. "Level/Cactus[3]/CactusFlower[1]"; identical on both PCs for scene-defined objects.
         static string PathOf(Transform t)
         {
@@ -75,7 +84,7 @@ namespace CoopMod
                     var h = hands.hand[i];
                     if (!h.grabbing || h.grabbedObject == null) continue;
                     var rb = BodyOf(h.grabbedObject);
-                    if (rb == null || rb.isKinematic || IsPlayerPart(rb.transform)) continue;
+                    if (rb == null || rb.isKinematic || IsPlayerPart(rb.transform) || IsPlantPart(rb)) continue;
                     int id = KeyOf(rb);
                     Tracked tr;
                     if (!tracked.TryGetValue(id, out tr)) { tr = new Tracked(); tracked[id] = tr; }
@@ -106,7 +115,7 @@ namespace CoopMod
                 map.Clear();
                 foreach (Rigidbody b in Object.FindObjectsOfType(typeof(Rigidbody)))
                 {
-                    if (b.isKinematic || IsPlayerPart(b.transform)) continue;
+                    if (b.isKinematic || IsPlayerPart(b.transform) || IsPlantPart(b)) continue;
                     map[KeyOf(b)] = b;
                 }
                 if (map.TryGetValue(id, out rb)) return rb;
@@ -125,7 +134,7 @@ namespace CoopMod
                 var rb = Lookup(h.id);
                 if (rb == null)
                 {
-                    if (reportedMissing.Add(h.id)) CoopBehaviour.Log("objects: peer moves object #" + h.id + " that I cannot find");
+                    if (reportedMissing.Add(h.id)) CoopBehaviour.Log("objects: peer moves object #" + h.id + " that I do not copy (not found here, or a plant part)");
                     continue;
                 }
                 if (!following.Contains(h.id)) { following.Add(h.id); CoopBehaviour.Log("objects: peer moves #" + h.id + " " + rb.name + "; my copy is at " + rb.position + ", theirs at " + h.pos + ", " + (rb.position - h.pos).magnitude.ToString("F1") + " m apart; kinematic=" + rb.isKinematic + " joints=" + rb.GetComponents<Joint>().Length); }
@@ -142,7 +151,7 @@ namespace CoopMod
                 for (int i = 0; i < targets.Count; i++)
                 {
                     var t = targets[i];
-                    if (t.rb == null || Time.time - t.time > 0.3f) continue;
+                    if (t.rb == null || t.rb.isKinematic || Time.time - t.time > 0.3f) continue;   // a kinematic body is held by its owner or is a plant part: never write velocities into it (PhysX warns on every step)
                     Vector3 err = t.pos - t.rb.position;
                     if (Time.time >= nextFollowLog) { nextFollowLog = Time.time + 1f; CoopBehaviour.Log("objects: following " + t.rb.name + " error " + err.magnitude.ToString("F2") + " m"); }
                     if (err.magnitude > 4f) { t.rb.position = t.pos; t.rb.rotation = t.rot; t.rb.velocity = t.vel; }

@@ -160,9 +160,9 @@ static partial class Program
             for (int i = 0; i < 100 && win.Current != GameWindow.View.Ask; i++) { Application.DoEvents(); Thread.Sleep(20); }
             Snap(win, PW, PH);
             var noSpot = win.ItemCenter(1);
-            win.Hover(noSpot, Cursor.Position);
+            win.Hover(noSpot, win.AskMouse);
             int resting = win.Selected;
-            win.Hover(noSpot, new Point(Cursor.Position.X + 60, Cursor.Position.Y + 40));
+            win.Hover(noSpot, new Point(win.AskMouse.X + 60, win.AskMouse.Y + 40));
             int moved = win.Selected;
             Check("GUI-INPUT", resting == 0 && moved == 1, "a resting mouse chooses nothing on a question; moving it onto an answer does", "resting -> " + resting + ", moved -> " + moved);
             win.Selected = 0; win.PressKey(Keys.Enter); restDone.WaitOne(5000);

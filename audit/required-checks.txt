@@ -12,6 +12,8 @@ PLANT-SIZE            | game   | one plant update stays small (under 100 KB) and
 PLANT-CONVERGE        | game   | a copy that only has an older plant ends up identical to the sender's, islands counter included
 PLANT-REBUILD         | game   | when updating in place fails, the fallback rebuild still gives the identical plant (fault injected)
 PLANT-DEFER           | game   | while my walkster stands on a plant, a friend update waits and lands once I step off (no rebuild under the camera)
+REMOTE-NO-GRAB       | game   | a remote player copy told to grab never grabs anything in my world (no pulling on my plant, no lock on my walkster)
+PLANT-PART-STEER     | game   | a friend held-object packet never moves a plant part (the plant is synced by its own updates only)
 PLANT-NOLEAK          | game   | sending plants does not pile up the game's after-load callbacks (they later crash on deleted branches)
 PLANT-OWNER           | game   | a received plant is never echoed, a plant a friend is growing is not overwritten, sending resumes afterwards
 ISLAND-ATTACH         | game   | an island a friend connected shows as connected on my side
