@@ -125,6 +125,12 @@ namespace CoopMod
             StartScreen.m_skipIntros = !File.Exists(Here("coop-intro.txt"));   // straight to the start menu: the logo screens only cost time on every start (put coop-intro.txt next to the exe to see them)
             Log("CoopMod loaded; Unity " + Application.unityVersion + "; players to connect to: " + peerSpecs.Count);
             if (File.Exists(Here("coop-selftest.txt"))) { Log("self test requested (coop-selftest.txt)"); gameObject.AddComponent<SelfTest>(); }
+            try   // an optional extra module that only exists on the owner's own PCs (never published): loaded when the file is there
+            {
+                string extra = Here("CoopCheat.dll");
+                if (File.Exists(extra)) { var t = System.Reflection.Assembly.LoadFrom(extra).GetType("CoopCheat.Cheat"); if (t != null) { gameObject.AddComponent(t); Log("extra module loaded"); } }
+            }
+            catch (Exception e) { Log("extra module failed: " + e.Message); }
         }
 
         void OnDestroy()
@@ -1136,6 +1142,7 @@ namespace CoopMod
             foreach (var w in clone.GetComponentsInChildren<WaterWadeSound>(true)) Destroy(w);
             foreach (var w in clone.GetComponentsInChildren<FallToDeath>(true)) Destroy(w);
             foreach (var w in clone.GetComponentsInChildren<PlayerOutOfBounds>(true)) Destroy(w);
+            foreach (var w in clone.GetComponentsInChildren<JetPack>(true)) Destroy(w);   // the copy's jetpack would talk to MY fuel meter (the HUD is shared): copies have none
             foreach (var w in clone.GetComponentsInChildren<CameraFocus>(true)) Destroy(w);   // the game camera frames every CameraFocus: copies must not pull it
             var driver = walker.gameObject.AddComponent<RemoteDriver>();
             driver.useKeyboard = !Online;

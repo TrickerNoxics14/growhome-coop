@@ -873,6 +873,7 @@ namespace CoopMod
                 for (int h = 0; h < 2; h++) if (hands.hand[h].grabbing || hands.hand[h].grabbedObject != null) grabbed = true;
             }
             Check("REMOTE-NO-GRAB", "a copy told to grab never grabs anything in my world", hands != null && !grabbed, hands == null ? "no hands on the copy" : (grabbed ? "a hand grabbed something" : "no hand grabbed"));
+            Check("CLONE-NO-JETPACK", "a copy of another player has no jetpack of its own (it would talk to my fuel meter)", peer.Clone.GetComponentsInChildren<JetPack>(true).Length == 0, peer.Clone.GetComponentsInChildren<JetPack>(true).Length + " found");
             peer.Driver.input.leftGrab = false; peer.Driver.input.rightGrab = false;
             Destroy(peer.Clone);
             peer.ClearClone();
@@ -1005,6 +1006,7 @@ namespace CoopMod
 
             plain.AddRange(twisted); mustReject += twisted.Count; twisted.Clear();     // every damaged update carries a checksum, so all of them must be refused
             SharedWorld.QuietRejects = true;
+            GC.Collect();   // start the timing from a clean heap: a garbage collection that falls inside one message would show up as a slow message (it still counts if it happens)
             int escaped = 0, slow = 0, count = 0; long worst = 0;
             int rejectedBefore = SharedWorld.StatRejected;
             var all = new List<byte[]>(plain);

@@ -18,7 +18,7 @@ static partial class Program
 {
     const string ExpectedAssemblySha = "8d99d51663061da95016e496116191850b6a5437250cfc38bb8576027b2aa40d";   // Grow Home Steam build 857617
     static string ManifestUrl = "https://raw.githubusercontent.com/TrickerNoxics14/growhome-coop/main/version.json";
-    const int BundledVersion = 8;                                  // version of the CoopMod.dll embedded in this exe
+    const int BundledVersion = 9;                                  // version of the CoopMod.dll embedded in this exe
 
     static string installDir, gameDir;
     static bool noPrompt, auditMode;
@@ -405,12 +405,14 @@ static partial class Program
 
     // Looks for a newer mod. Short timeouts so a slow or blocked network (school Wi-Fi) never holds the game up.
     // applyNow = true (tests): install straight away. false (normal start): download and keep it for the next start.
+    static string LastCheck = "";   // what the last check found, read by the launcher's button: "current", "staged", "installed", "failed" or "off"
     static bool UpdatesDisabled() { return File.Exists(Path.Combine(installDir, "coop-noupdate.txt")); }   // put this file next to the exe to never check
 
     // Returns the version that was downloaded and staged (or installed), 0 when nothing was. background = on a slow network it may take its time (nobody is waiting).
-    static int CheckForUpdate(bool applyNow, bool background = false)
+    static int CheckForUpdate(bool applyNow, bool background = false, bool byHand = false)
     {
-        if (UpdatesDisabled()) { Log("update checks are switched off (coop-noupdate.txt)"); return 0; }
+        if (UpdatesDisabled() && !byHand) { LastCheck = "off"; Log("update checks are switched off (coop-noupdate.txt)"); return 0; }
+        LastCheck = "failed";   // every path below that does not succeed keeps this; the ones that succeed set their own value
         int manifestMs = background ? 10000 : 4000, downloadMs = background ? 90000 : 15000;
         try
         {
@@ -418,16 +420,16 @@ static partial class Program
             int latest = int.Parse(Field(json, "version") ?? "0");
             string url = Field(json, "dll"), sha = Field(json, "sha256"), notes = Field(json, "notes");
             int have = InstalledVersion();
-            if (latest <= have) { Say("Co-op mod is up to date (version " + have + ")."); Log("up to date " + have); return 0; }
-            if (string.IsNullOrEmpty(url) || string.IsNullOrEmpty(sha) || !UrlAllowed(url)) { Log("update info looks wrong"); return 0; }
+            if (latest <= have) { LastCheck = "current"; Say("Co-op mod is up to date (version " + have + ")."); Log("up to date " + have); return 0; }
+            if (string.IsNullOrEmpty(url) || string.IsNullOrEmpty(sha) || !UrlAllowed(url)) { Say("The update server sent something this launcher cannot use; nothing was changed."); Log("update info looks wrong"); return 0; }
             if (!VerifyManifest(latest, sha, url, Field(json, "signature"))) { Say("This update is not signed by the author; skipped for safety."); Log("update has no valid signature: refused"); return 0; }
             Say("New co-op mod version " + latest + (notes != null ? " (" + notes + ")" : "") + ": downloading...");
             byte[] data = GetBytes(url, downloadMs);
             if (!string.Equals(Sha256(data), sha, StringComparison.OrdinalIgnoreCase)) { Say("Downloaded file did not match its fingerprint; skipped for safety."); Log("update fingerprint mismatch"); return 0; }
-            if (applyNow && Process.GetProcessesByName("GrowHome").Length == 0) { Swap(data, latest); Say("Updated."); Log("updated to " + latest); return latest; }
+            if (applyNow && Process.GetProcessesByName("GrowHome").Length == 0) { Swap(data, latest); LastCheck = "installed"; Say("Updated."); Log("updated to " + latest); return latest; }
             File.WriteAllBytes(StagedDll, data);
             File.WriteAllText(StagedInfo, latest + "\n" + sha);
-            Say("Update downloaded. It will be used the next time you start the game.");
+            LastCheck = "staged"; Say("Update downloaded. It will be used the next time you start the game.");
             Log("staged update " + latest);
             return latest;
         }

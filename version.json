@@ -1,7 +1,7 @@
 ﻿{
-    "version":  8,
+    "version":  9,
     "dll":  "https://raw.githubusercontent.com/TrickerNoxics14/growhome-coop/main/CoopMod.dll",
-    "sha256":  "95ceae9199f544243cf8715b86ae473935cf913254f0eb86e77ee148c3fca929",
-    "notes":  "Fixes the frozen walkster and camera jumps: remote copies no longer grab plant parts, object sync no longer moves plant parts or jointed bodies, and the PhysX velocity warnings are gone; the log now records walkster locks and garbage collections on hitches.",
-    "signature":  "YvmCEaJz58fzvdyd3aYsvDCvNdff7MvjkiSE6OWCns+hF+VSw8GFZWGB1m/MpVdwTYX6sdIvmUMvM7bwwajmOc7SSbftF06Y7shNcuixjG+t4oAPyHomytImYXuPnocJW+dDxRa8eN8682XPYXVRQD2AEzW0WMW92AGtAwcaPWtVBeTT5MqOWaSYIqH7hw4OfdZ0IhbWLa/foomuZbimCGBncsXTN4vy8yhX9YF8CQc9dfA62d3JDg7m77vXSgsrV+9ThgT1wsVVMHc6sGmA+H3Q8PHJVaX8UwAX9O2cWyKxdVuFyZxK/CHI2KoXJ7+fRpKWr4Mhz1lTGzgWkL2gXU3T8dQYFgXW3bnaFsuPOhDlcPAmm3JlMQq1ixZPkTyfzTM0xniwUVaHIfvBf5QfpXL9F6MKyjvfyGUeGMSzDb3j2tNSK2qXsJl1luH9rmRzYl2KOav0D7Ji93KqfY/JXssPH04nXLyipOIGLhPhIF1+7ciErytjYisM4PKj90V9"
+    "sha256":  "39de81f744919d2dd590876ddb2632f9c4f7d07010e565e73847441dcf280848",
+    "notes":  "Adds a Check for updates button to the launcher; friend copies no longer carry a jetpack that disturbed the fuel meter; test timing fixes.",
+    "signature":  "uXOhX3LIE5AKP5TcOf+t/JlwIrrayLVcpaKcFSn1rbnqZe79MrA9j7RvtXIlCDSaIqQJB0/bAEv7NApWezQpS/XwSLizYCBwe6qDz61kTOHeQPSozvILW4r3EuO4zFGWARsB2eUTLbHQuez/IZLABeFhPoxDNCdPNugDJcmBQQz+tdH/UrI9l6YTXP8HrP1vBluP+sk5bXWPONDmnalqa51UwPlALqtAOo+pT3xDoQzD1unaXEeXx20GB0+Y0EnWK85MhdLs8fCu34JGEOTMyTp7ha7khrhJ6/RiWdcmjF8F/QFgOWwZGnRBgrnUGLbZrzQOIpSdQ/pm+cfE+d/VCwPTQV7jJS21Y64y2mWV701a0P29gQSKySNzVJLjhnYjfZ33vQ76QuJQAwiz1vFQXCqu0NrYUqV+TuAzUU0PcCGLNSHodkQi9HXviPgU/9USahwRo4VDizTQFUg5XLMB3LLIxWlN1YuQ6BrvWKwFTkZTxC86gcqZPsa4YG8m/x4l"
 }

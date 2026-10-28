@@ -32,6 +32,77 @@ static partial class Program
         return n;
     }
 
+    // The home page's "Check for updates" button: it checks now (also when automatic checks are switched off), stages a newer mod for the next start,
+    // says what it found, and says so when the server cannot be reached. Runs the real code against a throw-away update server and a test page.
+    static void AuditUpdateButton(string tmp)
+    {
+        string realGame = gameDir, realInstall = installDir, realManifest = ManifestUrl, realPrivate = auditPrivateKey, realKey = UpdatePublicKeyXml;
+        installDir = Path.Combine(tmp, "button-install"); gameDir = Path.Combine(installDir, "game");
+        Directory.CreateDirectory(Path.GetDirectoryName(TargetDll));
+        byte[] v1 = Bytes("mod version one"), v2 = Bytes("mod version two, brand new");
+        File.WriteAllBytes(TargetDll, v1);
+        File.WriteAllText(Path.Combine(gameDir, "coop-version.txt"), "1");
+        var server = new MiniServer();
+        var win = new GameWindow(true);
+        try
+        {
+            var handle = win.Handle;   // the page needs a handle, so the check's answer reaches it
+            Check("UPDATE-BUTTON", handle != IntPtr.Zero, "the test page can receive the check's answer", "");
+            using (var k = new System.Security.Cryptography.RSACryptoServiceProvider(2048)) { auditPrivateKey = k.ToXmlString(true); UpdatePublicKeyXml = k.ToXmlString(false); }
+            ManifestUrl = server.Url("/version.json");
+            win.ShowHome();
+            int at = Array.FindIndex(win.ItemTexts(), s => s.StartsWith("Check for updates"));
+            Check("UPDATE-BUTTON", at >= 0, "the home page has a Check for updates button", string.Join(" | ", win.ItemTexts()));
+            if (at < 0) return;
+
+            // 1. the server has the installed version: up to date, nothing staged
+            server.Serve("/version.json", Manifest(1, server.Url("/mod1.dll"), Sha256(v1)));
+            PressCheck(win, at);
+            Check("UPDATE-BUTTON", LastCheck == "current" && win.ResultLine.Contains("UP TO DATE") && !File.Exists(StagedDll), "a check with nothing newer says the mod is up to date and stages nothing", LastCheck + ": " + win.ResultLine);
+            win.PressKey(Keys.Escape);
+            Check("UPDATE-BUTTON", win.Current == GameWindow.View.Home, "Escape returns from the check to the home page", win.Current.ToString());
+
+            // 2. a newer version: downloaded and staged for the next start; the installed mod is not touched yet
+            server.Serve("/mod2.dll", v2); server.Serve("/version.json", Manifest(2, server.Url("/mod2.dll"), Sha256(v2)));
+            PressCheck(win, at);
+            Check("UPDATE-BUTTON", LastCheck == "staged" && File.Exists(StagedDll) && File.Exists(StagedInfo) && SameBytes(TargetDll, v1) && InstalledVersion() == 1, "a newer version is downloaded and staged, the installed mod stays until the next start", LastCheck + ", staged " + File.Exists(StagedDll) + ", installed version " + InstalledVersion());
+            Check("UPDATE-BUTTON", win.ResultLine.Contains("DOWNLOADED"), "the page says a newer version is downloaded", win.ResultLine);
+            win.PressKey(Keys.Escape);
+            File.Delete(StagedDll); File.Delete(StagedInfo);
+
+            // 3. automatic checks switched off in Settings: the button still checks
+            File.WriteAllText(Path.Combine(installDir, "coop-noupdate.txt"), "off");
+            PressCheck(win, at);
+            Check("UPDATE-BUTTON", LastCheck == "staged" && File.Exists(StagedDll), "the button checks even when automatic checks are switched off", LastCheck);
+            win.PressKey(Keys.Escape);
+            File.Delete(StagedDll); File.Delete(StagedInfo);
+            File.Delete(Path.Combine(installDir, "coop-noupdate.txt"));
+
+            // 4. the server cannot be reached: the page says so and nothing changes
+            var dead = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0); dead.Start();
+            int deadPort = ((System.Net.IPEndPoint)dead.LocalEndpoint).Port; dead.Stop();
+            ManifestUrl = "http://127.0.0.1:" + deadPort + "/version.json";
+            PressCheck(win, at);
+            Check("UPDATE-BUTTON", LastCheck == "failed" && win.ResultLine.Contains("COULD NOT CHECK") && !File.Exists(StagedDll) && SameBytes(TargetDll, v1), "an unreachable server is reported and changes nothing", LastCheck + ": " + win.ResultLine);
+            win.PressKey(Keys.Escape);
+        }
+        finally
+        {
+            server.Stop();
+            win.Dispose();
+            gameDir = realGame; installDir = realInstall; ManifestUrl = realManifest; auditPrivateKey = realPrivate; UpdatePublicKeyXml = realKey;
+        }
+    }
+
+    // Presses the button on the given home-page line and waits (a few seconds at most) until the check has answered and the page shows it.
+    static void PressCheck(GameWindow win, int index)
+    {
+        win.Selected = index;
+        win.PressKey(Keys.Enter);
+        for (int i = 0; i < 1500 && win.CheckRunning; i++) { Application.DoEvents(); Thread.Sleep(20); }
+        for (int i = 0; i < 10; i++) { Application.DoEvents(); Thread.Sleep(10); }
+    }
+
     // Draws the pages the way a person would see them and keeps the pictures next to the audit report so they can be looked at.
     static void AuditGui(string tmp, string pictureDir)
     {
@@ -126,10 +197,13 @@ static partial class Program
             int start = win.Selected;
             win.PressKey(Keys.Down); win.PressKey(Keys.Down);
             Check("GUI-INPUT", win.Selected == 2, "the arrow keys move the selection", start + " -> " + win.Selected);
+            int itemCount = win.ItemTexts().Length;   // the home page has four lines now (Check for updates was added): count them, do not assume
+            for (int i = 2; i < itemCount - 1; i++) win.PressKey(Keys.Down);
+            Check("GUI-INPUT", win.Selected == itemCount - 1, "the arrow keys reach the last item", itemCount + " items");
             win.PressKey(Keys.Down);
             Check("GUI-INPUT", win.Selected == 0, "the selection wraps around", "");
             win.PressKey(Keys.Up);
-            Check("GUI-INPUT", win.Selected == 2, "up from the first item goes to the last", "");
+            Check("GUI-INPUT", win.Selected == itemCount - 1, "up from the first item goes to the last", "");
             win.Selected = 1; win.PressKey(Keys.Enter);
             Check("GUI-INPUT", win.Current == GameWindow.View.Settings, "Enter opens the selected page", win.Current.ToString());
             win.PressKey(Keys.Escape);

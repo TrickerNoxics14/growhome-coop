@@ -13,6 +13,7 @@ PLANT-CONVERGE        | game   | a copy that only has an older plant ends up ide
 PLANT-REBUILD         | game   | when updating in place fails, the fallback rebuild still gives the identical plant (fault injected)
 PLANT-DEFER           | game   | while my walkster stands on a plant, a friend update waits and lands once I step off (no rebuild under the camera)
 REMOTE-NO-GRAB       | game   | a remote player copy told to grab never grabs anything in my world (no pulling on my plant, no lock on my walkster)
+CLONE-NO-JETPACK      | game   | a remote player copy has no jetpack of its own, so it cannot disturb my fuel meter
 PLANT-PART-STEER     | game   | a friend held-object packet never moves a plant part (the plant is synced by its own updates only)
 PLANT-NOLEAK          | game   | sending plants does not pile up the game's after-load callbacks (they later crash on deleted branches)
 PLANT-OWNER           | game   | a received plant is never echoed, a plant a friend is growing is not overwritten, sending resumes afterwards
@@ -21,6 +22,7 @@ ISLAND-COUNTER        | game   | connecting an island is announced once, a frien
 CRYSTAL-SYNC          | game   | a crystal I collect is announced, a friend's disappears here and counts for the team, a made-up one does nothing
 MSG-FUZZ              | game   | hundreds of broken and hostile messages change nothing, escape nowhere and are never slow
 UPDATE-OFFLINE-FAST   | exe    | a dead or hanging update server delays the start by seconds at most and touches nothing
+UPDATE-BUTTON         | exe    | the home page's Check for updates button checks now (also when automatic checks are off), stages a newer mod, and reports an unreachable server
 UPDATE-STAGED-APPLY   | exe    | a newer mod is downloaded first, installed at the next start, the old one is kept
 UPDATE-TAMPER-REJECT  | exe    | a download that does not match its SHA-256 is never staged or installed
 UPDATE-NO-DOWNGRADE   | exe    | the same or an older version changes nothing

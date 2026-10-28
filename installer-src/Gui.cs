@@ -172,6 +172,7 @@ static partial class Program
         public int ProgressNow;
         string askText = ""; string[] askOptions = new string[0]; Action<int> askDone; View askFrom;
         string runTitle = "Starting"; string resultLine = ""; bool running, failed;
+        bool updateCheck;                                // the run page is the update check's: its Back returns home once the check has answered
         DateTime closeAt = DateTime.MaxValue;
         public int ExitCode;
         public int AskGraceMs = 900;           // a question ignores keys and clicks for this long, so a key still held down or a double click cannot answer it unseen
@@ -214,6 +215,7 @@ static partial class Program
             Current = View.Home; items.Clear(); Selected = 0;
             items.Add(new MenuItem { Text = IsInstalled ? "Play" : "Install + Play", Click = BeginFlow });
             items.Add(new MenuItem { Text = "Settings", Click = ShowSettings });
+            items.Add(new MenuItem { Text = "Check for updates", Click = BeginUpdateCheck });
             items.Add(new MenuItem { Text = "Quit", Click = () => Close() });
             Invalidate();
         }
@@ -287,7 +289,7 @@ static partial class Program
         {
             if (running) return;
             running = true; failed = false; resultLine = ""; log.Clear(); ProgressNow = 0;
-            runTitle = IsInstalled ? "Starting" : "Installing";
+            runTitle = IsInstalled ? "Starting" : "Installing"; updateCheck = false;
             Current = View.Run; items.Clear(); Selected = 0;
             var worker = new Thread(() =>
             {
@@ -298,6 +300,42 @@ static partial class Program
             worker.Start();
             Invalidate();
         }
+
+        // The home page's "Check for updates" button: it checks now, also when automatic checks are switched off in Settings, because the player asked for it.
+        // A newer mod is downloaded and used at the next start, as the automatic check does; the installed mod is never changed while the game runs.
+        public void BeginUpdateCheck()
+        {
+            if (running) return;
+            running = true; failed = false; resultLine = ""; log.Clear(); ProgressNow = 0; updateCheck = true;
+            runTitle = "Checking for updates";
+            Current = View.Run; items.Clear(); Selected = 0;
+            var worker = new Thread(() =>
+            {
+                try { CheckForUpdate(false, true, true); }
+                catch (Exception e) { LastCheck = "failed"; Post(() => AddLine("Could not check: " + e.Message)); }
+                Post(() => UpdateCheckDone());
+            }) { IsBackground = true };
+            worker.Start();
+            Invalidate();
+        }
+
+        void UpdateCheckDone()
+        {
+            running = false;
+            switch (LastCheck)
+            {
+                case "current": resultLine = "THE CO-OP MOD IS UP TO DATE (VERSION " + InstalledVersion() + ")."; break;
+                case "staged": resultLine = "A NEWER VERSION IS DOWNLOADED. IT IS USED THE NEXT TIME YOU START THE GAME."; break;
+                case "installed": resultLine = "A NEWER VERSION IS INSTALLED."; break;
+                default: failed = true; resultLine = "COULD NOT CHECK FOR UPDATES. NOTHING WAS CHANGED."; break;
+            }
+            items.Clear(); Selected = 0;
+            items.Add(new MenuItem { Text = "Back", Click = () => { ShowHome(); RefreshStatus(); } });
+            Invalidate();
+        }
+
+        public bool CheckRunning { get { return running; } }
+        public string ResultLine { get { return resultLine; } }
 
         void FlowDone(int code)
         {
@@ -368,7 +406,7 @@ static partial class Program
             if (Current == View.Settings) { ShowHome(); RefreshStatus(); }
             else if (Current == View.Ask) { if (!AskIsSettling()) Answer(askOptions.Length - 1); }
             else if (Current == View.Home) Close();
-            else if (Current == View.Run && failed) { ShowHome(); RefreshStatus(); }
+            else if (Current == View.Run && !running && (failed || updateCheck)) { ShowHome(); RefreshStatus(); }
         }
 
         public void Move(int d) { if (items.Count > 0) { Selected = (Selected + d + items.Count) % items.Count; Invalidate(); } }
