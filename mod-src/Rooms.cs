@@ -49,6 +49,19 @@ namespace CoopMod
         // Steam gives a room to another member when its owner leaves; that member must never be taken for the host (they could accept themselves into a private room)
         public static bool HostChanged(ulong hostWhenIJoined, ulong ownerNow) { return hostWhenIJoined != 0 && ownerNow != hostWhenIJoined; }
 
+        // The host of my room is the player I joined or made it with (recorded then, never changed by a later owner). Without a room the host is the lowest SteamID among the configured players; 0 means nobody.
+        public static ulong HostFor(ulong recordedRoomHost, ulong lowestOtherPlayer) { return recordedRoomHost != 0 ? recordedRoomHost : lowestOtherPlayer; }
+
+        // In a room only the players the room lets in may talk to me; without a room (configured players) everybody configured may.
+        public static bool MayTalk(bool roomUsed, bool memberAllowed) { return !roomUsed || memberAllowed; }
+
+        // The room the F2 menu's Enter key picks (set in the launcher's settings): 1 = public, 4 = listed and I accept, 2 = private. Anything else is public.
+        public static int RoomChoice(string saved)
+        {
+            string t = (saved ?? "").Trim().ToLowerInvariant();
+            return t == "ask" ? 4 : t == "private" ? 2 : 1;
+        }
+
         public static string RoomName(string raw) { return PlayerNames.Clean(raw, "Room"); }
     }
 

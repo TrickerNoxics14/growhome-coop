@@ -402,6 +402,20 @@ namespace CoopMod
         }
 
         // Rooms: a public room lets anybody in, a private one only the players the host accepted; nobody the host refused; hostile room data changes nothing.
+        // Who may talk to me, whose host I follow, whose name a message is credited to, and which Steam Cloud names may become files: the rules the mod uses, checked on every run.
+        void CheckSecurity()
+        {
+            bool talk = !RoomRules.MayTalk(true, false) && RoomRules.MayTalk(false, false) && RoomRules.MayTalk(true, true);
+            Check("ROOM-TALK", "a player my room does not let in (or that left it) is heard by nobody; without a room the configured players are heard", talk, "");
+            bool host = RoomRules.HostFor(100, 50) == 100 && RoomRules.HostFor(0, 50) == 50 && RoomRules.HostFor(0, 0) == 0;
+            Check("ROOM-HOST", "the host stays the player I joined, even after Steam hands the room to someone else; a player who merely joins later is never taken for the host", host, "");
+            bool sender = SharedWorld.SenderOf(5555, 4444) == 5555 && SharedWorld.SenderOf(0, 4444) == 4444;
+            Check("ROOM-DEFAULT", "the room the F2 menu's Enter key picks is read from the settings: ask = listed and I accept, private = private, anything else = public", RoomRules.RoomChoice("ask") == 4 && RoomRules.RoomChoice("private") == 2 && RoomRules.RoomChoice("") == 1 && RoomRules.RoomChoice("garbage") == 1, "");
+            Check("SENDER-ID", "a plant or island is credited to the player whose connection it came from, not to a name written inside the message", sender, "");
+            bool cloud = !SaveGuard.SafeCloudName("../x") && !SaveGuard.SafeCloudName("/abs") && !SaveGuard.SafeCloudName("C:x") && !SaveGuard.SafeCloudName("a\\b") && !SaveGuard.SafeCloudName("a/../b") && !SaveGuard.SafeCloudName("") && SaveGuard.SafeCloudName("Levels/GrowHome.sav");
+            Check("CLOUD-NAMES", "a Steam Cloud file name can never take a save outside the save folder (no .., rooted, drive or back-slash names)", cloud, "");
+        }
+
         void CheckRooms()
         {
             const ulong host = 100, guest = 200, other = 300;
@@ -580,6 +594,7 @@ namespace CoopMod
             try { CheckNetSanity(); } catch (Exception e) { Check("AUDIT-ERROR", "network sanity checks ran", false, Describe(e)); }
             try { CheckNames(); } catch (Exception e) { Check("AUDIT-ERROR", "name checks ran", false, Describe(e)); }
             try { CheckChat(); } catch (Exception e) { Check("AUDIT-ERROR", "chat checks ran", false, Describe(e)); }
+            try { CheckSecurity(); } catch (Exception e) { Check("AUDIT-ERROR", "security checks ran", false, Describe(e)); }
             try { CheckRooms(); } catch (Exception e) { Check("AUDIT-ERROR", "room checks ran", false, Describe(e)); }
 
             float begin = Time.realtimeSinceStartup;

@@ -51,3 +51,9 @@ ROOMS                 | game   | public rooms let everybody in, private rooms on
 MOUSE-FREE            | game   | while the code box / join window is open the mouse is shown and unlocked so JOIN and CANCEL can be clicked, and the game gets it back afterwards
 GHOST-LEFT            | game   | a player who closed the game (no signal for 6 s) is taken out of the other players worlds, not earlier
 TELEPORTER-SYNC       | game   | switching a teleporter on unlocks it for every player: mine is announced once, a friend's unlocks it here and is not sent back, broken messages are refused
+ROOM-TALK            | game   | a player my room does not let in (or who left it) is heard by nobody; without a room the configured players are heard
+ROOM-HOST            | game   | the host stays the player I joined, even after Steam hands the room to someone else; a later joiner is never taken for host
+SENDER-ID            | game   | a plant or island is credited to the player whose connection it came from, not to a name written inside the message
+CLOUD-NAMES          | game   | a Steam Cloud file name can never take a save outside the save folder
+SETTINGS             | exe    | the launcher settings: on-screen display, name tags, chat log and world sharing are plain files that switch both ways, and the room setting cycles public, listed-you-accept, private
+ROOM-DEFAULT         | game   | the room the F2 menu Enter key picks is read from the settings (ask = listed and I accept, private = private, anything else = public)

@@ -331,12 +331,12 @@ namespace CoopMod
             }
         }
 
-        static void ApplyPlant(byte[] msg)
+        static void ApplyPlant(byte[] msg, ulong from)
         {
             if (!WorldSync.InWorld() || !InitReflection()) return;
             var r = new BinaryReader(new MemoryStream(msg)); r.ReadByte();
             string rootId = r.ReadString();
-            ulong sender = r.ReadUInt64();
+            ulong sender = SenderOf(from, r.ReadUInt64());
             int rawLen = r.ReadInt32(); int compLen = r.ReadInt32(); uint sum = r.ReadUInt32();
             if (compLen < 0 || compLen > msg.Length) throw new FormatException("bad packed size");
             byte[] data = Decompress(r.ReadBytes(compLen), rawLen);
@@ -470,10 +470,10 @@ namespace CoopMod
             }
         }
 
-        static void ApplyIsland(byte[] msg)
+        static void ApplyIsland(byte[] msg, ulong from)
         {
             var r = new BinaryReader(new MemoryStream(msg)); r.ReadByte();
-            ulong sender = r.ReadUInt64(); int counter = r.ReadInt32(); string pid = r.ReadString();
+            ulong sender = SenderOf(from, r.ReadUInt64()); int counter = r.ReadInt32(); string pid = r.ReadString();
             if (!WorldSync.InWorld() || !Singleton<PlayerAnalytics>.Exists) return;
             var pa = Singleton<PlayerAnalytics>.Instance;
             // the next growth stage depends on this number, so a damaged or hostile value must not move it: the game has a few dozen islands at most
@@ -539,7 +539,7 @@ namespace CoopMod
             return ms.ToArray();
         }
 
-        public static void TestApply(byte[] msg) { ApplyPlant(msg); }
+        public static void TestApply(byte[] msg) { ApplyPlant(msg, 0UL); }
         public static void TestRevert(string rootId, byte[] raw) { InitReflection(); RemovePlantCopy(rootId); LoadUpdate(raw); }
         public static void TestForget(string rootId) { owner.Remove(rootId); lastSig.Remove(rootId); lastSent.Remove(rootId); dirty.Remove(rootId); }
 
@@ -593,14 +593,19 @@ namespace CoopMod
             }
         }
 
-        public static void Handle(byte[] msg)
+        public static void Handle(byte[] msg) { Handle(msg, 0UL); }
+
+        // Who a plant or island is credited to: the player whose connection it came in on. Only the self test (which builds its own messages) passes 0 and gets the sender written inside the message.
+        public static ulong SenderOf(ulong fromConnection, ulong senderInMessage) { return fromConnection != 0 ? fromConnection : senderInMessage; }
+
+        public static void Handle(byte[] msg, ulong from)
         {
             if (!Enabled || msg == null || msg.Length == 0) return;
             try
             {
                 if (msg[0] == MsgShard) ApplyShard(msg);
-                else if (msg[0] == MsgPlant) ApplyPlant(msg);
-                else if (msg[0] == MsgIsland) ApplyIsland(msg);
+                else if (msg[0] == MsgPlant) ApplyPlant(msg, from);
+                else if (msg[0] == MsgIsland) ApplyIsland(msg, from);
                 else if (msg[0] == MsgTeleporter) ApplyTeleporter(msg);
             }
             catch (Exception e) { StatRejected++; if (!QuietRejects) CoopBehaviour.Log("shared: rejected a bad message (" + Short(e) + ")"); }

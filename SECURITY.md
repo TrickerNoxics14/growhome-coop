@@ -42,3 +42,10 @@ Open an issue on the repository, or message the author privately for anything th
 - In a private or "you accept" room nobody is connected to until the host says yes (Y/N). Only the player who owned the room when you joined is the host: if Steam hands the room to somebody else, the room closes for you, so a waiting player can never accept themselves.
 - Chat shows the sender's real connection name, plain text, 100 characters, 5 messages per 6 seconds.
 - Joining somebody else's public room means playing in their world: a world snapshot is accepted only from the room's host and is size- and checksum-checked; join only rooms you trust.
+
+## Hardening (v5 review)
+- Host: only the room owner I joined counts as host (recorded when I joined or made the room). If Steam hands the room to someone else, nobody new becomes host. Without a room, the configured players are used, as before.
+- Who is heard: once I have joined or made a room, only players the room currently admits are heard (chat, positions, plants, islands, world data). A player who left or was refused is heard by nobody.
+- Credit: plant and island updates are credited to the connection they arrived on, so a player cannot claim someone else's name inside a message.
+- Steam Cloud: a cloud file name that could leave the save folder (.., rooted, drive letters, back-slashes) is refused.
+- Known limits, not changed: the LAN fast path (coop-lan.txt, opt-in) is plain UDP and unauthenticated; only use it on a network you trust. Local test files (coop-selftest.txt and similar) work only for someone who can already write to the game folder.

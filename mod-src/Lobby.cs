@@ -51,6 +51,7 @@ namespace CoopMod
         public string Code = "";
         public string Status = "";
         public Action<ulong> OnMember;     // called for every member we learn about (including ourselves)
+        readonly HashSet<ulong> talk = new HashSet<ulong>();   // the room members I may hear from right now (admitted, not refused)
 
         public bool IsOpen;                  // the room I am in is public (listed, anybody may join)
         public readonly List<Room> Rooms = new List<Room>();
@@ -84,7 +85,7 @@ namespace CoopMod
             entered.Set(SteamMatchmaking.JoinLobby(new CSteamID(lobbyId)));
         }
 
-        public void Leave() { if (InLobby) { SteamMatchmaking.LeaveLobby(Id); InLobby = false; IsOpen = false; Code = ""; } }
+        public void Leave() { if (InLobby) { SteamMatchmaking.LeaveLobby(Id); InLobby = false; IsOpen = false; Code = ""; talk.Clear(); } }
 
         void OnCreated(LobbyCreated_t r, bool ioFailure)
         {
@@ -119,6 +120,7 @@ namespace CoopMod
         void OnUpdate(LobbyChatUpdate_t u)
         {
             if (!InLobby || u.m_ulSteamIDLobby != Id.m_SteamID) return;
+            RefreshTalk();
             if ((u.m_rgfChatMemberStateChange & (uint)EChatMemberStateChange.k_EChatMemberStateChangeEntered) != 0)
             {
                 CoopBehaviour.Log("lobby: " + u.m_ulSteamIDUserChanged + " joined");
@@ -128,6 +130,7 @@ namespace CoopMod
 
         void SyncMembers()
         {
+            RefreshTalk();
             int n = SteamMatchmaking.GetNumLobbyMembers(Id);
             for (int i = 0; i < n; i++)
             {
@@ -151,8 +154,8 @@ namespace CoopMod
         // true once the host has said yes or no to this player
         public bool Decided(ulong user) { return RoomRules.ParseIds(Data("ok")).Contains(user) || RoomRules.ParseIds(Data("no")).Contains(user); }
 
-        public void Approve(ulong user) { if (IsOwner) SteamMatchmaking.SetLobbyData(Id, "ok", RoomRules.AddId(Data("ok"), user)); }
-        public void Deny(ulong user) { if (IsOwner) SteamMatchmaking.SetLobbyData(Id, "no", RoomRules.AddId(Data("no"), user)); }
+        public void Approve(ulong user) { if (IsOwner) { SteamMatchmaking.SetLobbyData(Id, "ok", RoomRules.AddId(Data("ok"), user)); RefreshTalk(); } }
+        public void Deny(ulong user) { if (IsOwner) { SteamMatchmaking.SetLobbyData(Id, "no", RoomRules.AddId(Data("no"), user)); RefreshTalk(); } }
 
         // What the room says about me: 0 = fine, 1 = waiting for the host, 2 = the host refused me
         public int MyAdmission()
@@ -189,6 +192,22 @@ namespace CoopMod
         }
 
         // The lobby owner is the player who made the code: the host whose world everybody plays in (0 when not in a lobby).
+        // Is this player's connection allowed to talk to me right now? (Cached: rebuilt whenever members or the room's data change.)
+        public bool MayTalk(ulong user) { return InLobby && talk.Contains(user); }
+
+        public void RefreshTalk()
+        {
+            talk.Clear();
+            if (!InLobby) return;
+            string mode = Data("mode"), ok = Data("ok"), no = Data("no");
+            int n = SteamMatchmaking.GetNumLobbyMembers(Id);
+            for (int i = 0; i < n; i++)
+            {
+                ulong m = SteamMatchmaking.GetLobbyMemberByIndex(Id, i).m_SteamID;
+                if (m != 0 && RoomRules.Allowed(mode, HostId, m, ok, no)) talk.Add(m);
+            }
+        }
+
         public ulong OwnerId() { return InLobby ? SteamMatchmaking.GetLobbyOwner(Id).m_SteamID : 0UL; }
 
         // Used by the P2P layer: is this Steam user in my lobby right now?

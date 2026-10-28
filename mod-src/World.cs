@@ -41,6 +41,16 @@ namespace CoopMod
             catch (Exception e) { CoopBehaviour.Log("SaveGuard: " + e.GetType().Name + " " + e.Message); }
         }
 
+        // A Steam Cloud name becomes a file path: refuse anything that could leave the save folder (.., rooted, drive letters, back-slashes, control characters).
+        public static bool SafeCloudName(string name)
+        {
+            if (string.IsNullOrEmpty(name) || name.Length > 200) return false;
+            if (name[0] == '/' || name.IndexOf(':') >= 0 || name.IndexOf('\\') >= 0) return false;
+            foreach (char c in name) if (c < 0x20) return false;
+            foreach (string part in name.Split('/')) if (part.Length == 0 || part == "." || part == "..") return false;
+            return true;
+        }
+
         static void SeedFromCloud()
         {
             if (!SteamUser.GetSteamID().IsValid()) return; // Steam not up yet; try again next frame
@@ -52,10 +62,12 @@ namespace CoopMod
                 int size;
                 string name = SteamRemoteStorage.GetFileNameAndSize(i, out size);
                 if (string.IsNullOrEmpty(name) || size <= 0) continue;
+                if (!SafeCloudName(name)) { CoopBehaviour.Log("SaveGuard: refused a cloud file with an unsafe name"); continue; }
                 var buf = new byte[size];
                 int got = SteamRemoteStorage.FileRead(name, buf, size);
                 if (got != size) { CoopBehaviour.Log("SaveGuard: short cloud read for " + name); continue; }
                 string dest = Path.Combine(Root, name.Replace('/', Path.DirectorySeparatorChar));
+                if (!Path.GetFullPath(dest).StartsWith(Path.GetFullPath(Root).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) continue;
                 Directory.CreateDirectory(Path.GetDirectoryName(dest));
                 File.WriteAllBytes(dest, buf);
                 CoopBehaviour.Log("SaveGuard: copied cloud file " + name + " (" + size + " bytes) into coop-saves");

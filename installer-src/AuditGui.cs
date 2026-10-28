@@ -198,6 +198,29 @@ static partial class Program
             win.PressKey(Keys.Enter);
             bool on = !File.Exists(noUpdate) && !UpdatesDisabled();
             Check("GUI-INPUT", off && on, "the update setting switches checking off and on again", "off " + off + ", on " + on);
+
+            // the other settings are files too: each switches both ways, and the room setting cycles public, listed-you-accept, private
+            string[] names = { "On-screen display", "Name tags", "Chat log", "Share world" };
+            string[] files = { "coop-ui-hidden.txt", "coop-noname.txt", "coop-nochat.txt", "coop-noshare.txt" };
+            bool toggles = true;
+            for (int k = 0; k < names.Length; k++)
+            {
+                string f = Path.Combine(gameDir, files[k]);
+                win.ShowSettings();
+                win.Selected = Array.FindIndex(win.ItemTexts(), s => s.StartsWith(names[k]));
+                win.PressKey(Keys.Enter);
+                bool hidden = File.Exists(f);
+                win.PressKey(Keys.Enter);
+                toggles &= hidden && !File.Exists(f);
+            }
+            win.ShowSettings();
+            win.Selected = Array.FindIndex(win.ItemTexts(), s => s.StartsWith("Room for F2"));
+            string roomFile = Path.Combine(gameDir, CoopSettings.RoomFile);
+            win.PressKey(Keys.Enter); string r1 = File.Exists(roomFile) ? File.ReadAllText(roomFile).Trim() : "";
+            win.PressKey(Keys.Enter); string r2 = File.Exists(roomFile) ? File.ReadAllText(roomFile).Trim() : "";
+            win.PressKey(Keys.Enter); string r3 = File.Exists(roomFile) ? File.ReadAllText(roomFile).Trim() : "";
+            bool cycle = r1 == "ask" && r2 == "private" && r3 == "public";
+            Check("SETTINGS", toggles && cycle, "the other settings are plain files that switch both ways, and the room setting cycles public, listed-you-accept, private", "toggles " + toggles + ", room " + r1 + " " + r2 + " " + r3);
         }
     }
 }

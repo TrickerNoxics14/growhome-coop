@@ -1,7 +1,7 @@
 ﻿{
-    "version":  5,
+    "version":  6,
     "dll":  "https://raw.githubusercontent.com/TrickerNoxics14/growhome-coop/main/CoopMod.dll",
-    "sha256":  "4da477b1f61e23af31dd4fc4d20fd007a0f5f0f86a8d74f6a24c6fd671a491b6",
-    "notes":  "Version 5: rooms (public, listed with host approval, private), join list, chat fixes, names, mouse and menu fixes, players who leave disappear, safer room rules, plant parts removed when they are gone, teleporters unlock for everybody",
-    "signature":  "sYgJj1jhBOSDYtkPTJWbXBJytBtJZKzqI1ZVsdfoevIoA4oofhLlJzTWq6FeY4ap3ZaXo3/yy7vljmOc2md5fia2hKyjwsAiIex2Ws6YCwLO1CXV6xGKgQ+WzGr3kQboHaTq1Ch9YpjqUzQya3Sf8LvbfyiRWHZzpU6AGMcEp9HW1yXpJHBBta2jO8gbOqW3gGDsbcEsKDw/ICBveEjUYT08aKknh4+yAeVeg2gzAJpGEqVaXi4tZsE3XAQeMm89+4DEVtCRSLBiA0C1Up+5DhrTNU7KxgHQ4xjg/k8jLYWKkxbs/8hnuas8V/y1+4vyDMf/W2FhjDj3ACTRYUoi8EJypnx0ZSQL7+2B/JESbACINUJu3VW28DHW1NzMSRKBW6zCBAKqBkPhFLWQVUl0SAq2n0PG2JB0BVI/4vjKxmN8Kr8uiqHEIBgJtGCckC62x47wTDeE/LHOOK5/vM2NNsSR3kgDTDzonRTRHrFVHAWj3pqLrcj6U0L/KBXIhiQ0"
+    "sha256":  "39a2eaa763de1761b04b73b7166df759ff285112ede739ae920d785c75b1e98d",
+    "notes":  "Security fixes (room host and room talk rules, sender credit, safe Steam Cloud names) and a bigger settings menu: on-screen display, name tags, chat log, share world and the room for F2.",
+    "signature":  "n/ukMKGWDlvtfg6kHZnSfre5P/OYhh7WxqBDcCGc4vga+lN2wPR0+9ju7IifXvZ/+3h3/gfZfGx4ZO0ApqL6U8Hojv0M1p7GT9Sq0/p+GFlUGlikFVkgaMVNEPXvRBbCqnAcTvriFefxYGXysx7aZMMuhU/GnTHGGj43MOexmxyAbsUjVpkAnarO+IDaLckKt3G0W2pgwz+IDteTtMdDdIc8HrhGtzZkYjrHJYC5CG3ONJmGzQId2TreNN12xIDerTwtTfEru7eyfjGRqLYFy1nV1KVaBn/51baNY4pwNRuxoH0bl12WJyJ86RqGzGjy4BpK6B1hQjE7ynhZHbPPydt8oMoE3/zhvyNVLs70MrqXPj4HUSLScY7J9TpCBW0NySIfZ0/R3398VGLzIzv9qvwCJraKU//3ZtivusKWbA6sPey4GqPhmuQWQIjbyppfKnSbQLRdXPM46vFuLzm1Js7AX9Du4lSF6cGL5i2KUZ/psU0y1oP5RQ109ttwcjl0"
 }

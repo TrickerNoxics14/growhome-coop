@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Publishes the audited build to GitHub: a SIGNED version.json, the mod, the sources, a release with the launcher and the installer. Then checks what friends will really get.
   Refuses unless the newest full audit passed for exactly this build. Run it only when the author has said to publish.
@@ -64,7 +64,7 @@ try {
     git add -A 2>$null | Out-Null
     $pending = git status --porcelain
     if ($pending) {
-        $msg = "Version ${version}: $Notes`n`nAll critical checks passed for this build (audit/CRITICAL-CHECKS.md). The update is signed (SECURITY.md).`n`nCo-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
+        $msg = "Version ${version}: $Notes`n`nAll critical checks passed for this build (audit/CRITICAL-CHECKS.md). The update is signed (SECURITY.md).`n`nCo-Authored-By: Claude Haiku 5.5 <noreply@anthropic.com>"
         git commit -q -m $msg 2>$null | Out-Null
         if ($LASTEXITCODE -ne 0) { Fail 'git commit failed' }
     }
@@ -99,3 +99,4 @@ try {
     foreach ($k in $checks.Keys) { Say ("  {0,-4} {1}" -f $(if ($checks[$k]) { 'OK' } else { 'FAIL' }), $k) $(if ($checks[$k]) { 'Green' } else { 'Red' }); if (-not $checks[$k]) { $ok = $false } }
 } finally { Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue }
 if ($ok) { Say "Published and verified: https://github.com/$Repo/releases/tag/v$version" 'Cyan'; exit 0 } else { Say 'Published, but a check failed: look at it now.' 'Red'; exit 1 }
+

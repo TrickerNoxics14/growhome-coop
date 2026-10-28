@@ -247,7 +247,7 @@ namespace CoopMod
         }
 
         // Choose what kind of room to make: 1 = public, 4 = listed but the host accepts, 2 = private (code only), 3 = cancel (also keys 1, 2, 3 and Esc).
-        public static int HostMenu(float openedAt)
+        public static int HostMenu(float openedAt, int defaultChoice)
         {
             Build();
             int choice = 0;
@@ -269,6 +269,7 @@ namespace CoopMod
                 if (ev.keyCode == KeyCode.Alpha1 || ev.keyCode == KeyCode.Keypad1) choice = 1;
                 if (ev.keyCode == KeyCode.Alpha2 || ev.keyCode == KeyCode.Keypad2) choice = 4;
                 if (ev.keyCode == KeyCode.Alpha3 || ev.keyCode == KeyCode.Keypad3) choice = 2;
+                if (ev.keyCode == KeyCode.Return || ev.keyCode == KeyCode.KeypadEnter) choice = defaultChoice;   // Enter picks the room chosen in the launcher's settings
                 if (ev.keyCode == KeyCode.Escape) choice = 3;
             }
             return choice;

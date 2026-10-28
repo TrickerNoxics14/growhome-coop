@@ -18,7 +18,7 @@ static partial class Program
 {
     const string ExpectedAssemblySha = "8d99d51663061da95016e496116191850b6a5437250cfc38bb8576027b2aa40d";   // Grow Home Steam build 857617
     static string ManifestUrl = "https://raw.githubusercontent.com/TrickerNoxics14/growhome-coop/main/version.json";
-    const int BundledVersion = 5;                                   // version of the CoopMod.dll embedded in this exe
+    const int BundledVersion = 6;                                   // version of the CoopMod.dll embedded in this exe
 
     static string installDir, gameDir;
     static bool noPrompt, auditMode;

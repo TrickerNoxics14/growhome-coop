@@ -93,3 +93,9 @@ It never publishes anything: pushing a new version to GitHub for friends is a se
 | MOUSE-FREE | game | the mouse works in the code box and room menus | the real mod frees the cursor against a game that locks it |
 | GHOST-LEFT | game | a player who left does not stay standing in the world | the 6-second rule and the real removal of the copy |
 | TELEPORTER-SYNC | game | a teleporter one player switches on is unlocked for everybody | the real teleporters of the world, both directions, echo and bad messages |
+| ROOM-TALK | game | only players my room admits may talk to me | the rule the mod uses, checked on every run |
+| ROOM-HOST | game | the host is the room owner I joined, not whoever Steam hands the room to | the rule the mod uses |
+| SENDER-ID | game | plant and island updates are credited to their connection, not a name inside the message | the rule the mod uses |
+| CLOUD-NAMES | game | cloud file names cannot escape the save folder | the rule the mod uses, with hostile names |
+| SETTINGS | exe | every settings option switches the mod and the launcher as shown | the settings page driven with keys, files checked each way |
+| ROOM-DEFAULT | game | the F2 menu Enter key picks the room chosen in the settings | the rule the mod uses |

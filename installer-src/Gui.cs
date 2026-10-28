@@ -233,11 +233,26 @@ static partial class Program
                 Value = () => "<  " + (File.Exists(skinFile) && File.ReadAllText(skinFile).Trim() == "Oceanic" ? "Blue" : "Red") + "  >",
                 Click = () => { try { bool blue = File.Exists(skinFile) && File.ReadAllText(skinFile).Trim() == "Oceanic"; File.WriteAllText(skinFile, blue ? "Standard" : "Oceanic"); } catch { } Invalidate(); }
             });
+            string hudFile = Path.Combine(gameDir, "coop-ui-hidden.txt");
+            string noNames = Path.Combine(gameDir, "coop-noname.txt");
+            string noChat = Path.Combine(gameDir, "coop-nochat.txt");
+            string noShare = Path.Combine(gameDir, "coop-noshare.txt");
+            items.Add(new MenuItem { Text = "On-screen display", Value = () => YesNo(!File.Exists(hudFile)), Click = () => Toggle(hudFile, "the mod's on-screen display is hidden (F1 shows it again)") });
+            items.Add(new MenuItem { Text = "Name tags", Value = () => YesNo(!File.Exists(noNames)), Click = () => Toggle(noNames, "name tags above players hidden") });
+            items.Add(new MenuItem { Text = "Chat log", Value = () => YesNo(!File.Exists(noChat)), Click = () => Toggle(noChat, "chat log hidden (T still opens the chat box)") });
+            items.Add(new MenuItem { Text = "Share world", Value = () => YesNo(!File.Exists(noShare)), Click = () => Toggle(noShare, "my plants, islands and crystals are not shared with friends") });
+            items.Add(new MenuItem { Text = "Room for F2", Value = () => "<  " + CoopSettings.RoomLabel(CoopSettings.ReadRoom(gameDir)) + "  >", Click = () => CycleRoom() });
             items.Add(new MenuItem { Text = "Back", Click = () => { ShowHome(); RefreshStatus(); } });
             Invalidate();
         }
 
         // These settings are plain files next to the program: a file means "the unusual choice".
+        void CycleRoom()
+        {
+            try { File.WriteAllText(Path.Combine(gameDir, CoopSettings.RoomFile), CoopSettings.NextRoom(CoopSettings.ReadRoom(gameDir))); } catch { }
+            Invalidate();
+        }
+
         void Toggle(string file, string note)
         {
             try { if (File.Exists(file)) File.Delete(file); else { Directory.CreateDirectory(Path.GetDirectoryName(file)); File.WriteAllText(file, note); } } catch { }
@@ -570,8 +585,9 @@ static partial class Program
                     Dots(g, x + lw + 14, 65 + rowW - vw - 18, y + 28, on ? Look.Pink : Look.Text);
                     Glow(g, value, vf, on ? Look.Pink : Look.Text, 65 + rowW - vw, y + 6, on ? Look.Red : Look.Cyan);
                 }
-                it.Hit = new RectangleF(55, y - 4, rowW + 20, 48);
-                y += 50;
+                float step = Current == View.Settings ? Math.Min(50f, 400f / items.Count) : 50f;   // the settings page has more rows now: they tighten to fit above the footer
+                it.Hit = new RectangleF(55, y - 4, rowW + 20, step - 2);
+                y += step;
             }
         }
 
