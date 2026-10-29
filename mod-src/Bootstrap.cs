@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Collections;
 using System.Collections.Generic;
 using System.Net;
 using System.Text;
@@ -195,10 +196,14 @@ namespace CoopMod
             if (Online && Input.GetKeyDown(KeyCode.F3)) OpenJoinBox();
             ChatKeys();
             RoomTick();
+            PartyTick();
             if (Online && !chatOpen && !joinOpen && !hostMenuOpen && Input.GetKeyDown(KeyCode.T) && WorldSync.InWorld()) OpenChat();
-            if (!Online && Time.time >= nextSteamTry) TryStartSteam();
+            if (!Online && Time.realtimeSinceStartup >= nextSteamTry) TryStartSteam();
             if (Online) NetTick();
             SettingsTick();
+            NativeUI.Tick();
+            try { CoopMenu.Tick(this); } catch (Exception e) { Log("ui: co-op menu: " + e.GetType().Name + " " + e.Message); }
+            MenuDeferredTick();
             if (Time.realtimeSinceStartup >= nextUpdateNote) { nextUpdateNote = Time.realtimeSinceStartup + 10f; string note = TakeUpdateNotice(Here("coop-update-ready.txt")); if (note != null) { CoopUI.Toast(note); Log("update notice shown: " + note); } }
         }
 
@@ -249,8 +254,10 @@ namespace CoopMod
         void AutoPull()
         {
             var host = HostPeer();
-            if (host == null || host.AutoPulled || !host.Connected || Time.time - host.ConnectedAt < 3f) return;
+            if (host != null && host.AutoPulled && WorldSync.SkipAutoPull && WorldSync.InWorld()) WorldSync.SkipAutoPull = false;   // nothing left to skip
+            if (host == null || host.AutoPulled || !host.Connected || Time.realtimeSinceStartup - host.ConnectedAt < 3f) return;
             if (!WorldSync.InWorld()) return;
+            if (WorldSync.SkipAutoPullNow()) { WorldSync.SkipAutoPull = false; host.AutoPulled = true; Log("auto: the leader's world was loaded at the start, no second pull"); return; }
             host.AutoPulled = true;
             Log("auto: " + host.Label + " is the host, joining their world as a guest");
             WorldSync.EnterGuestMode();
@@ -264,7 +271,7 @@ namespace CoopMod
 
         void TryStartSteam()
         {
-            nextSteamTry = Time.time + 2f;
+            nextSteamTry = Time.realtimeSinceStartup + 2f;
             try
             {
                 if (!SteamUser.GetSteamID().IsValid()) return;
@@ -285,7 +292,10 @@ namespace CoopMod
                 RenumberPeers();
                 SetupLan();
 
-                lobby = new Lobby { OnMember = OfferMember };
+                lobby = new Lobby { OnMember = OfferMember, OnJoinAsked = JoinParty };
+                // started by Steam from an invite ("+connect_lobby <id>"): join that party once Steam is up
+                var args = Environment.GetCommandLineArgs();
+                for (int i = 0; i + 1 < args.Length; i++) { ulong l; if (args[i] == "+connect_lobby" && ulong.TryParse(args[i + 1], out l) && l != 0) connectAtStart = l; }
                 hub.AcceptUnknown = id => { if (lobby != null && lobby.Allowed(id)) { AddMember(id); return true; } return false; };
                 Log("steam up; my SteamID64=" + myId + " (I am Player " + myNumber + "); other players: " + peers.Count + "; host is " + (HostPeer() == null ? "me" : HostPeer().Label));
             }
@@ -350,6 +360,7 @@ namespace CoopMod
             foreach (var p in peers) if (p.Id == id) return;
             if (peers.Count >= MaxPeers) return;
             AddPeerInternal(id, false);
+            roomPeers.Add(id);
             RenumberPeers();
             Log("player added: " + id + " (now " + peers.Count + " other players; I am Player " + myNumber + ")");
         }
@@ -501,10 +512,10 @@ namespace CoopMod
                 Perf.Begin(); CloneDiag(p); Perf.End("CloneDiag");
                 Perf.Begin(); SkinTick(p); Perf.End("SkinTick");
                 SyncLog(p);
-                if (SignalLost(p.WasConnected, Time.time, p.LastPacketTime)) { p.WasConnected = false; DropGhost(p); if (!p.IsBot) CoopUI.Toast("SIGNAL LOST: " + p.Label); }
-                if (Time.time >= p.NextPing)
+                if (SignalLost(p.WasConnected, Time.realtimeSinceStartup, p.LastPacketTime)) { p.WasConnected = false; DropGhost(p); if (!p.IsBot) CoopUI.Toast("SIGNAL LOST: " + p.Label); }
+                if (Time.realtimeSinceStartup >= p.NextPing)
                 {
-                    p.NextPing = Time.time + 1f;
+                    p.NextPing = Time.realtimeSinceStartup + 1f;
                     var pg = new byte[5]; pg[0] = 0xC1;
                     Buffer.BlockCopy(BitConverter.GetBytes(Time.realtimeSinceStartup), 0, pg, 1, 4);
                     p.Link.Send(pg);
@@ -580,21 +591,22 @@ namespace CoopMod
             if (!MayTalkTo(p)) { while (p.Link.Receive() != null) { } return; }
             while ((data = p.Link.Receive()) != null)
             {
-                if (data.Length == 5 && data[0] == 0xC1) { data[0] = 0xC2; p.Link.Send(data); continue; }
+                // pings keep a player heard too: on the start screen no positions are sent, and a party must not see its members drop
+                if (data.Length == 5 && data[0] == 0xC1) { data[0] = 0xC2; p.Link.Send(data); Heard(p); continue; }
                 if (data.Length == 5 && data[0] == 0xC2)
                 {
                     float rtt = (Time.realtimeSinceStartup - BitConverter.ToSingle(data, 1)) * 1000f;
                     p.RttSum += rtt; p.RttN++; if (rtt > p.RttMax) p.RttMax = rtt;
+                    Heard(p);
                     continue;
                 }
                 var s = PlayerState.Read(data);
                 if (s == null || s.seq <= p.LastRecvSeq) continue;
                 if (s.pos.y < -30f) continue;   // that player is falling out of the world: do not chase them
                 p.LastRecvSeq = s.seq;
-                if (Time.time - p.LastPacketTime > 10f) { p.ConnectedAt = Time.time; p.AutoPulled = false; Log(p.Label + " connected"); if (!p.IsBot) CoopUI.Toast("SIGNAL ACQUIRED: " + p.Label + " ONLINE"); }
-                p.WasConnected = true;
-                float gap = Time.time - p.LastPacketTime; if (gap < 5f) { p.GapMax = Mathf.Max(p.GapMax, gap); p.GapSum += gap; p.GapN++; }
-                p.LastPacketTime = Time.time;
+                float gap = Time.realtimeSinceStartup - p.LastStateTime; if (gap < 5f) { p.GapMax = Mathf.Max(p.GapMax, gap); p.GapSum += gap; p.GapN++; }
+                p.LastStateTime = Time.realtimeSinceStartup;
+                Heard(p);
                 if (root == null) continue;
                 if (p.Clone == null)
                 {
@@ -662,7 +674,16 @@ namespace CoopMod
         public bool WantMouseForTest { get { return WantMouse; } }
         public void ApplyCursorForTest() { LateUpdate(); }
         public void OpenJoinForTest() { if (!joinOpen) OpenJoinBox(); }
-        public void CloseJoinForTest() { CloseJoinBox(); }
+        public void CloseJoinForTest() { JoinAct(CoopUI.JoinCancel, -1, noRooms); }   // the window's own CANCEL, as the player presses it
+
+        // what the join window's buttons do
+        void JoinAct(int act, int roomIdx, List<Room> rooms)
+        {
+            if (act == CoopUI.JoinCode) SubmitJoin();
+            else if (act == CoopUI.JoinCancel) CloseJoinBox();
+            else if (act == CoopUI.JoinRefresh && lobby != null) lobby.RequestRooms();
+            else if (act == CoopUI.JoinRoom && roomIdx >= 0 && roomIdx < rooms.Count) { lobby.Join(rooms[roomIdx].Id); CloseJoinBox(); }
+        }
 
         void LateUpdate()
         {
@@ -949,6 +970,13 @@ namespace CoopMod
         {
             if (lobby == null || id == 0 || id == myId) return;
             if (lobby.Allowed(id)) { AddMember(id); return; }
+            // a friends party: the leader's own Steam friends come straight in (the leader's yes is written into the party, so every member lets them in too)
+            if (lobby.IsOwner && lobby.FriendsOnly && lobby.IsMember(id) && !lobby.Decided(id) && IsSteamFriend(id))
+            {
+                lobby.Approve(id); AddMember(id);
+                Log("party: my Steam friend " + id + " came in");
+                return;
+            }
             if (lobby.IsOwner && lobby.IsMember(id) && !lobby.Decided(id) && !pending.Contains(id) && pending.Count < 4)
             {
                 pending.Add(id);
@@ -980,10 +1008,14 @@ namespace CoopMod
                 if (Input.GetKeyDown(KeyCode.Y)) AnswerJoinRequest(true);
                 else if (Input.GetKeyDown(KeyCode.N)) AnswerJoinRequest(false);
             }
-            if (Time.time < nextPoll) return;
-            nextPoll = Time.time + 2f;
+            if (Time.realtimeSinceStartup < nextPoll) return;      // real time: the party lobby on the start screen runs with game time stopped
+            nextPoll = Time.realtimeSinceStartup + 2f;
             lobby.Poll();
+            if (!lobby.InLobby) return;
             pending.RemoveAll(p => !lobby.IsMember(p));
+            // players who left the party: drop them, so their place is free for somebody else
+            var still = lobby.Members();
+            foreach (ulong id in new List<ulong>(roomPeers)) if (!still.Contains(id)) { roomPeers.Remove(id); RemovePeer(id); }
             int adm = lobby.MyAdmission();
             if (adm == 2) { lobby.Leave(); lobby.Status = "the host did not accept you"; joinMsg = lobby.Status; CoopUI.Toast("THE HOST SAID NO"); }
             else if (adm == 1) { lobby.Status = "waiting for the host to let you in..."; if (!waitToasted) { waitToasted = true; CoopUI.Toast("WAITING FOR THE HOST TO LET YOU IN"); } }
@@ -1009,7 +1041,352 @@ namespace CoopMod
             if (lobby != null) lobby.RequestRooms();
         }
 
-        void CloseJoinBox() { if (joinOpen) { joinOpen = false; InputManager.Pop(this); } }
+        void CloseJoinBox()
+        {
+            if (joinOpen) { joinOpen = false; InputManager.Pop(this); }
+            if (joinFromStart) { joinFromStart = false; FreezeMenus(false); reopenParty = true; }   // opened from the party menu on the start screen: back to it (menus live again first)
+        }
+        public bool JoinOpenForTest { get { return joinOpen; } }
+
+        // ---- the CO-OP line of the pause menu (CoopMenu.cs) ---------------------------------------------------------------------------
+
+        public CoopMenu.State CoopMenuState()
+        {
+            var s = new CoopMenu.State();
+            s.Online = Online && lobby != null;
+            s.InLobby = lobby != null && lobby.InLobby;
+            s.Busy = lobby != null && lobby.Busy;
+            s.IsHost = IAmHost;
+            s.InWorld = WorldSync.InWorld();
+            s.HostConnected = HostPeer() != null && HostPeer().Connected;
+            s.DisplayHidden = CoopUI.Hidden;
+            s.Code = s.InLobby ? lobby.Code : "";
+            s.Pending = pending.Count > 0 ? PendingName().ToUpper() : "";
+            var names = new List<string>();
+            foreach (var p in peers) if (p.Connected && names.Count < 3) names.Add(p.Label.ToUpper());
+            s.Players = string.Join(", ", names.ToArray()) + (CountConnected() > 3 ? " +" + (CountConnected() - 3) : "");
+            s.Status = lobby != null ? lobby.Status.ToUpper() : "";
+            s.AtStart = AtStartScreen;
+            s.Following = following || hostStarting;
+            s.Page = menuPage; s.FriendPage = friendPage;
+            s.Invite = lobby != null && !s.InLobby && lobby.InviteWaiting ? NameOf(lobby.InviteFrom).ToUpper() : "";
+            if (s.InLobby)
+            {
+                s.Leader = NameOf(lobby.HostId).ToUpper();
+                s.Members = PartyMembers();
+                s.Ready = myReady;
+                s.HostPlaying = lobby.Get("play").Length > 0;
+                s.Waiting = lobby.MyAdmission() == 1;
+                if (s.AtStart) s.Status = "";
+                if (menuPage == "friends") s.Friends = FriendsNow();
+            }
+            return s;
+        }
+
+        int CountConnected() { int n = 0; foreach (var p in peers) if (p.Connected) n++; return n; }
+
+        // What a line does. Lines that need typing (join code, chat) or the world (re-join) leave the menus first and open their window a moment later.
+        string afterMenu;
+        public void CoopMenuAction(string id)
+        {
+            Log("ui: co-op menu: " + id);
+            switch (id)
+            {
+                case "host_friends": if (lobby != null && !lobby.InLobby) lobby.Create(false, false, true); break;
+                case "host_public": MakeRoom(true, true); break;
+                case "accept_invite": if (lobby != null && lobby.InviteWaiting) JoinParty(lobby.InviteLobby); break;
+                case "start": StartAsLeader(); break;
+                case "follow": FollowLeader(); break;
+                case "ready": if (lobby != null && lobby.InLobby) { myReady = !myReady; lobby.SetMine("ready", myReady ? "1" : "0"); } break;
+                case "friends": if (lobby != null && lobby.InLobby) { menuPage = "friends"; friendPage = 0; friendsAt = -99f; } break;
+                case "friends_more": friendPage = (friendPage + 1) % Party.Pages(FriendsNow().Count); break;
+                case "leave": LeaveParty(true); break;
+                case "host_accept": MakeRoom(false, true); break;
+                case "host_private": MakeRoom(false, false); break;
+                case "copy": if (lobby != null && lobby.InLobby) { CopyToClipboard(lobby.Code); CoopUI.Toast("INVITE CODE COPIED: " + lobby.Code); } break;
+                case "let_in": AnswerJoinRequest(true); break;
+                case "refuse": AnswerJoinRequest(false); break;
+                case "display": ToggleUi(); break;
+                case "join":
+                    if (AtStartScreen && CoopMenu.Menu != null)
+                    {
+                        // on the start screen the start menu stays behind the join window; the party menu comes back when the window closes
+                        CoopMenu.Menu.Close();
+                        if (!joinOpen) OpenJoinBox();
+                        joinFromStart = true;
+                    }
+                    else { afterMenu = id; LeaveMenus(); }
+                    break;
+                case "chat": case "rejoin": afterMenu = id; LeaveMenus(); break;
+                default:
+                    ulong friend;
+                    if (id.StartsWith("invite:") && ulong.TryParse(id.Substring(7), out friend)) InviteFriend(friend);
+                    break;
+            }
+        }
+
+        // ---- the party (Party.cs): gather on the start screen, the leader starts, everybody follows ----------------------------------------
+
+        string menuPage = ""; int friendPage;
+        bool following, hostStarting, myReady, wasInLobby, joinFromStart, reopenParty;
+        string seenPlay;                                       // the leader's game I last saw started (so going back to the start screen is not undone)
+        ulong connectAtStart;
+        float nextParty, friendsAt = -99f;
+        List<Party.Friend> friendsCache = new List<Party.Friend>();
+        readonly HashSet<ulong> roomPeers = new HashSet<ulong>();      // players I am connected to because of the party (dropped when I leave it)
+        readonly HashSet<ulong> invitedFriends = new HashSet<ulong>();
+        public const float PreloadWait = 20f;
+
+        bool AtStartScreen { get { return Singleton<StartScreen>.Exists && !WorldSync.InGameOrLoading(); } }
+
+        // The start screen is ready for the party: past the intro screens, the start menu or the party menu on screen, no fade, no game starting.
+        bool StartScreenIdle { get { return AtStartScreen && !FadeScreen.FadeInProgress && (CoopMenu.StartMenuShowing() || CoopMenu.PartyMenuShowing()); } }
+
+        public void MenuOpened() { menuPage = ""; reopenParty = false; }
+        public bool BlockBack { get { return following || hostStarting; } }   // the party menu stays up while the game is starting (no start menu buttons racing it)
+        public bool MenuBack() { if (menuPage.Length == 0) return false; menuPage = ""; return true; }
+        public void SetMenuPageForTest(string page) { menuPage = page ?? ""; }
+        public bool FollowingForTest { get { return following; } }
+        public int RoomPeerCountForTest { get { return roomPeers.Count; } }
+        public bool HasPeerForTest(ulong id) { foreach (var p in peers) if (p.Id == id) return true; return hub != null && hub.Links.ContainsKey(id); }
+        public void AddRoomPeerForTest(ulong id) { AddMember(id); }
+        public void LeavePartyForTest() { LeaveParty(false); }
+
+        bool IsSteamFriend(ulong id)
+        {
+            try { return SteamFriends.HasFriend(new CSteamID(id), EFriendFlags.k_EFriendFlagImmediate); } catch (Exception) { return false; }
+        }
+
+        string NameOf(ulong id)
+        {
+            if (id == myId && !string.IsNullOrEmpty(myName)) return myName;
+            try { return PlayerNames.Clean(SteamFriends.GetFriendPersonaName(new CSteamID(id)), "PLAYER"); } catch (Exception) { return "PLAYER"; }
+        }
+
+        List<Party.Member> PartyMembers()
+        {
+            var list = new List<Party.Member>();
+            if (lobby == null || !lobby.InLobby) return list;
+            foreach (ulong id in lobby.Members())
+                list.Add(new Party.Member { Id = id, Name = NameOf(id), Leader = id == lobby.HostId, Me = id == myId, Ready = lobby.MemberData(id, "ready") == "1", Waiting = id != lobby.HostId && !lobby.Allowed(id) });
+            return Party.Ordered(list);
+        }
+
+        // My Steam friends who are online (playing Grow Home first), without the ones already in the party; read again every few seconds while the page is open.
+        List<Party.Friend> FriendsNow()
+        {
+            if (Time.realtimeSinceStartup - friendsAt < 3f) return friendsCache;
+            friendsAt = Time.realtimeSinceStartup;
+            var list = new List<Party.Friend>();
+            try
+            {
+                var inParty = lobby != null ? lobby.Members() : new List<ulong>();
+                uint app = SteamUtils.GetAppID().m_AppId;
+                int n = SteamFriends.GetFriendCount(EFriendFlags.k_EFriendFlagImmediate);
+                for (int i = 0; i < n && i < 500 && list.Count < 100; i++)
+                {
+                    var id = SteamFriends.GetFriendByIndex(i, EFriendFlags.k_EFriendFlagImmediate);
+                    if (id.m_SteamID == 0 || inParty.Contains(id.m_SteamID)) continue;
+                    if (SteamFriends.GetFriendPersonaState(id) == EPersonaState.k_EPersonaStateOffline) continue;
+                    FriendGameInfo_t game;
+                    bool playing = SteamFriends.GetFriendGamePlayed(id, out game) && game.m_gameID.AppID().m_AppId == app;
+                    list.Add(new Party.Friend { Id = id.m_SteamID, Name = PlayerNames.Clean(SteamFriends.GetFriendPersonaName(id), "FRIEND"), InGame = playing, Invited = invitedFriends.Contains(id.m_SteamID) });
+                }
+            }
+            catch (Exception e) { Log("party: friend list failed " + e.GetType().Name + " " + e.Message); }
+            friendsCache = Party.SortFriends(list);
+            return friendsCache;
+        }
+
+        void InviteFriend(ulong friend)
+        {
+            if (lobby == null || !lobby.InLobby) return;
+            bool sent = false;
+            try { sent = lobby.Invite(friend); } catch (Exception e) { Log("party: invite failed " + e.GetType().Name); }
+            if (sent) { invitedFriends.Add(friend); friendsAt = -99f; CoopUI.Toast("INVITE SENT TO " + NameOf(friend).ToUpper()); Log("party: invited " + friend); }
+            else CoopUI.Toast("COULD NOT SEND THE INVITE");
+        }
+
+        // An invite accepted (in the party menu, or in Steam itself): into that party, leaving the one I am in.
+        void JoinParty(ulong lobbyId)
+        {
+            if (lobby == null || lobbyId == 0) return;
+            if (lobby.InLobby && lobby.Id.m_SteamID == lobbyId) return;
+            if (lobby.InLobby) LeaveParty(false);
+            lobby.ClearInvite();
+            lobby.Join(lobbyId);
+            Log("party: joining party " + lobbyId);
+            if (AtStartScreen && !CoopMenu.PartyMenuShowing()) reopenParty = true;
+        }
+
+        void LeaveParty(bool byMe)
+        {
+            if (lobby == null) return;
+            bool was = lobby.InLobby;
+            following = false; hostStarting = false;
+            if (was) { lobby.SetMine("ready", "0"); lobby.Leave(); }
+            if (byMe) lobby.Status = "you left the party";
+            AfterLeave();
+            if (byMe && was) { CoopUI.Toast("YOU LEFT THE PARTY"); Log("party: I left the party"); }
+        }
+
+        // The party is over for me (I left, the leader left or said no): forget everything about it and drop the players I only had because of it.
+        void AfterLeave()
+        {
+            wasInLobby = false;
+            pending.Clear(); invitedFriends.Clear(); myReady = false; seenPlay = null; codeSaved = false; menuPage = ""; waitToasted = false;
+            foreach (ulong id in new List<ulong>(roomPeers)) RemovePeer(id);
+            roomPeers.Clear();
+            if (!WorldSync.StartingNow()) { following = false; hostStarting = false; }   // a follow already handed to the game's own start finishes; anything else ends here
+            WorldSync.SkipAutoPull = false;
+            if (AtStartScreen && !following) WorldSync.LeaveGuestMode();
+        }
+
+        // anything from this player: a connection after more than 10 s of silence is a new one (their world is copied again, once)
+        void Heard(Peer p)
+        {
+            if (Time.realtimeSinceStartup - p.LastPacketTime > 10f)
+            {
+                p.ConnectedAt = Time.realtimeSinceStartup; p.AutoPulled = false;
+                Log(p.Label + " connected"); if (!p.IsBot) CoopUI.Toast("SIGNAL ACQUIRED: " + p.Label + " ONLINE");
+            }
+            p.WasConnected = true;
+            p.LastPacketTime = Time.realtimeSinceStartup;
+        }
+
+        void RemovePeer(ulong id)
+        {
+            for (int i = peers.Count - 1; i >= 0; i--)
+            {
+                var p = peers[i];
+                if (p.IsBot || p.Id != id) continue;
+                DropGhost(p);
+                var link = p.Link as PeerLink;
+                if (link != null) allLinks.Remove(link);
+                WorldSync.Forget(p.Link);
+                peers.RemoveAt(i);
+            }
+            if (hub != null) hub.Links.Remove(id);
+            try { SteamNetworking.CloseP2PSessionWithUser(new CSteamID(id)); } catch (Exception) { }
+            RenumberPeers();
+            Log("party: player " + id + " dropped (" + peers.Count + " other players left)");
+        }
+
+        // The leader presses START GAME: the leader's own game starts (CONTINUE, or NEW GAME without a save) and the party data says a game is on.
+        void StartAsLeader()
+        {
+            if (!StartScreenIdle || hostStarting || following || lobby == null || !lobby.InLobby || !lobby.IsOwner) return;
+            if (WorldSync.GuestMode) WorldSync.LeaveGuestMode();
+            if (WorldSync.GuestMode) { CoopUI.Toast("YOUR OWN SAVE IS NOT BACK YET, TRY AGAIN"); return; }
+            if (!CoopMenu.PartyMenuShowing()) CoopMenu.OpenFromStart(false);
+            hostStarting = true;
+            AnnouncePlay(true);
+            bool fresh = !SaveSystem.LevelSaveExists(Application.loadedLevelName);
+            Log("party: I start the game (" + (fresh ? "new game" : "continue") + "); " + (lobby.Members().Count - 1) + " other players follow");
+            StartScreen.StartGameCountdown(fresh);
+        }
+
+        void AnnouncePlay(bool playing)
+        {
+            string play = lobby.Get("play");
+            string want = Party.PlayFor(playing, AtStartScreen && !playing, play, Party.ParseRound(lobby.Get("round")));
+            if (want == play) return;
+            if (want.Length > 0) lobby.Set("round", want);
+            lobby.Set("play", want);
+            Log("party: " + (want.Length > 0 ? "game " + want + " started, the party follows" : "back on the start screen"));
+        }
+
+        // A member follows the leader in: guest saves first, then the leader's world is fetched and written as the save the game loads, then the game starts.
+        void FollowLeader()
+        {
+            if (following || hostStarting || lobby == null || !lobby.InLobby || lobby.IsOwner) return;
+            if (joinOpen) { joinFromStart = false; CloseJoinBox(); }
+            if (menuEvents != null) FreezeMenus(false);           // the join window had the menus paused: live again before a menu opens
+            if (!StartScreenIdle || UnityEngine.EventSystems.EventSystem.current == null) return;   // intro screens, a fade, a game already starting, or menus not live yet: tried again shortly
+            CloseHostMenu();
+            reopenParty = false;
+            if (!CoopMenu.PartyMenuShowing())
+            {
+                // the party menu covers the start menu while the game starts
+                try { CoopMenu.OpenFromStart(false); }
+                catch (Exception e) { Log("party: the party menu did not open " + SharedWorld.Short(e) + "; trying again shortly"); return; }
+                if (!CoopMenu.PartyMenuShowing()) return;
+            }
+            following = true; myReady = false; lobby.SetMine("ready", "0");
+            seenPlay = lobby.Get("play");
+            StartCoroutine(FollowRoutine());
+        }
+
+        IEnumerator FollowRoutine()
+        {
+            Log("party: following the leader into their game");
+            CoopUI.Toast("JOINING THE LEADER'S GAME");
+            WorldSync.EnterGuestMode();
+            if (!WorldSync.GuestPathsActive()) { following = false; Log("party: guest mode failed, not following"); yield break; }
+            WorldSync.BeginPreload();
+            float t0 = Time.realtimeSinceStartup, askedAt = -99f;
+            while (Time.realtimeSinceStartup - t0 < PreloadWait && !WorldSync.Preloaded)
+            {
+                if (!following || lobby == null || !lobby.InLobby || !AtStartScreen) { WorldSync.EndPreload(); following = false; yield break; }   // left the party, or the game started some other way
+                var host = HostPeer();
+                if (host != null && Time.realtimeSinceStartup - askedAt > 15f) { askedAt = Time.realtimeSinceStartup; WorldSync.Request(host.Link); }   // a world takes a while to arrive; ask again only rarely
+                yield return null;
+            }
+            bool got = WorldSync.Preloaded;
+            WorldSync.EndPreload();
+            Log("party: " + (got ? "the leader's world arrived, starting" : "no world from the leader after " + PreloadWait + " s, starting anyway (it is copied once I am in)"));
+            // only from the party menu, with nothing else starting the game: otherwise two countdowns would fight
+            float t1 = Time.realtimeSinceStartup;
+            while (following && AtStartScreen && !(CoopMenu.PartyMenuShowing() && !FadeScreen.FadeInProgress) && Time.realtimeSinceStartup - t1 < 5f) yield return null;
+            if (!following || !AtStartScreen || !CoopMenu.PartyMenuShowing() || FadeScreen.FadeInProgress) { following = false; Log("party: the game was not started from the party menu, follow cancelled"); yield break; }
+            WorldSync.SkipAutoPull = got;
+            WorldSync.BeginStart();
+            StartScreen.StartGameCountdown(false);
+        }
+
+        void PartyTick()
+        {
+            if (!Online || lobby == null) return;
+            bool inWorld = WorldSync.InWorld(), atStart = AtStartScreen;
+            if (wasInLobby && !lobby.InLobby) AfterLeave();          // the party ended without me pressing LEAVE (the leader left, or said no)
+            if (!wasInLobby && lobby.InLobby) { myReady = false; lobby.SetMine("ready", "0"); seenPlay = null; }
+            wasInLobby = lobby.InLobby;
+            if (inWorld || !Singleton<StartScreen>.Exists) { following = false; hostStarting = false; }
+            if (connectAtStart != 0 && Singleton<StartScreen>.Exists) { ulong l = connectAtStart; connectAtStart = 0; JoinParty(l); }
+            if (reopenParty && !joinOpen && !following)
+            {
+                if (!atStart) reopenParty = false;
+                else if (CoopMenu.StartMenuShowing() && !FadeScreen.FadeInProgress && menuEvents == null && UnityEngine.EventSystems.EventSystem.current != null) { reopenParty = false; CoopMenu.OpenFromStart(false); }
+            }
+            if (atStart && !lobby.InLobby && WorldSync.GuestMode && !following) WorldSync.LeaveGuestMode();
+            if (!lobby.InLobby || Time.realtimeSinceStartup < nextParty) return;
+            nextParty = Time.realtimeSinceStartup + 0.5f;
+            if (lobby.IsOwner) AnnouncePlay(inWorld || hostStarting);
+            else
+            {
+                string play = lobby.Get("play");
+                if (inWorld) seenPlay = play;
+                else if (Party.ShouldFollow(atStart, false, lobby.MyAdmission() == 0, following || hostStarting, play, seenPlay)) FollowLeader();
+            }
+        }
+
+        static void LeaveMenus()
+        {
+            if (Singleton<PauseManager>.Exists && PauseManager.Paused) PauseManager.ResumeRequested = true;   // the game's own resume: closes every menu, un-pauses
+            else if (Singleton<GUIManager>.Exists) Singleton<GUIManager>.Instance.CloseAllMenus();
+        }
+
+        void MenuDeferredTick()
+        {
+            if (afterMenu == null) return;
+            if (Singleton<GUIManager>.Exists && Singleton<GUIManager>.Instance.AnyMenuActive) return;
+            if (Singleton<PauseManager>.Exists && PauseManager.Paused) return;
+            string id = afterMenu; afterMenu = null;
+            if (!Online) return;
+            if (id == "join") { if (!joinOpen) OpenJoinBox(); }
+            else if (id == "chat") { if (!chatOpen && WorldSync.InWorld()) OpenChat(); }
+            else if (id == "rejoin") PullWorld();
+        }
 
         void SubmitJoin()
         {
@@ -1045,10 +1422,7 @@ namespace CoopMod
                 int act, roomIdx;
                 var rooms = lobby != null ? lobby.Rooms : noRooms;
                 joinText = CoopUI.JoinWindow(joinText, joinMsg, joinOpenedAt, rooms, lobby != null && lobby.Listing, out act, out roomIdx);
-                if (act == CoopUI.JoinCode) SubmitJoin();
-                else if (act == CoopUI.JoinCancel) CloseJoinBox();
-                else if (act == CoopUI.JoinRefresh && lobby != null) lobby.RequestRooms();
-                else if (act == CoopUI.JoinRoom && roomIdx >= 0 && roomIdx < rooms.Count) { lobby.Join(rooms[roomIdx].Id); CloseJoinBox(); }
+                JoinAct(act, roomIdx, rooms);
             }
             if (pending.Count > 0 && !joinOpen && !hostMenuOpen && !CoopUI.Hidden) CoopUI.JoinRequest(PendingName());
 

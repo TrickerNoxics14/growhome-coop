@@ -600,9 +600,10 @@ namespace CoopMod
             try { CheckChat(); } catch (Exception e) { Check("AUDIT-ERROR", "chat checks ran", false, Describe(e)); }
             try { CheckSecurity(); } catch (Exception e) { Check("AUDIT-ERROR", "security checks ran", false, Describe(e)); }
             try { CheckRooms(); } catch (Exception e) { Check("AUDIT-ERROR", "room checks ran", false, Describe(e)); }
+            try { CheckParty(); } catch (Exception e) { Check("PARTY", "party checks ran", false, Describe(e)); }
 
             float begin = Time.realtimeSinceStartup;
-            bool pressed = false; float menuAt = -1f;
+            bool pressed = false, partyTested = false; float menuAt = -1f;
             while (!WorldSync.InWorld())
             {
                 if (!pressed && StartMenuReady())
@@ -612,7 +613,14 @@ namespace CoopMod
                         menuAt = Time.realtimeSinceStartup;
                         Check("STARTUP-FAST", "the start menu is reached quickly because the intro screens are skipped", menuAt < 15f, menuAt.ToString("F1") + " s after the game started (limit 15 s; with the intro screens it takes more than 15 s)");
                     }
-                    if (Time.realtimeSinceStartup - menuAt > 2f)
+                    if (Time.realtimeSinceStartup - menuAt > 2f && !partyTested)
+                    {
+                        // the party lobby lives on the start screen: test it there, before the game starts
+                        partyTested = true;
+                        yield return StartCoroutine(TestPartyMenu());
+                        if (CoopMenu.Menu != null && CoopMenu.Menu.gameObject.activeInHierarchy) CoopMenu.Menu.Close();
+                    }
+                    else if (Time.realtimeSinceStartup - menuAt > 2f)
                     {
                         pressed = true;
                         bool fresh = !SaveSystem.LevelSaveExists(Application.loadedLevelName);
@@ -632,6 +640,9 @@ namespace CoopMod
             try { CheckNamesLive(); } catch (Exception e) { Check("AUDIT-ERROR", "live name check ran", false, Describe(e)); }
             try { CheckChatLive(); } catch (Exception e) { Check("AUDIT-ERROR", "live chat check ran", false, Describe(e)); }
             try { CheckCursorLive(); } catch (Exception e) { Check("AUDIT-ERROR", "live mouse check ran", false, Describe(e)); }
+            try { CheckUiDump(); } catch (Exception e) { Check("UI-DUMP", "menu dump check ran", false, Describe(e)); }
+            yield return StartCoroutine(TestHudMessages());
+            yield return StartCoroutine(TestCoopMenu());
 
             var roots = new List<PlantRoot>();
             foreach (PlantRoot r in UnityEngine.Object.FindObjectsOfType(typeof(PlantRoot))) if (SharedWorld.PlantId(r) != null) roots.Add(r);
@@ -852,6 +863,531 @@ namespace CoopMod
 
         // Crystals: my collection is announced, a friend's removes the crystal here and counts for the team, a made-up one does nothing.
         // Switching a teleporter on unlocks it for everybody: mine is announced once, a friend's unlocks it here and is not sent back, broken messages do nothing.
+        // The game's menus and HUD are written to coopmod-ui.log once per level, so the native co-op menu can be built from the real layout.
+        void CheckUiDump()
+        {
+            string text = File.Exists(NativeUI.DumpPath) ? File.ReadAllText(NativeUI.DumpPath) : "";
+            int menus = Singleton<GUIManager>.Exists ? Singleton<GUIManager>.Instance.m_Menus.Count : 0;
+            Check("UI-DUMP", "the game's menus and HUD were written to coopmod-ui.log when the level built them", NativeUI.Dumps > 0 && menus > 0 && text.Contains("menu PauseMenu") && text.Contains("---- hud ") && !text.Contains("hud: none") && text.Contains("onClick "),
+                "dumps=" + NativeUI.Dumps + " menus=" + menus + " size=" + text.Length + " pauseMenu=" + text.Contains("menu PauseMenu") + " hud=" + text.Contains("---- hud ") + " buttons=" + text.Contains("onClick "));
+        }
+
+        // Co-op messages use the game's own M.O.M panel: shown there, in order, a game message pushed aside comes back, a busy panel or a stopped game
+        // sends them to the overlay instead, nothing is lost.
+        IEnumerator TestHudMessages()
+        {
+            var hud = Singleton<AbilityHUD>.Exists ? Singleton<AbilityHUD>.Instance : null;
+            if (hud == null || hud.m_textBottomLine == null) { Check("HUD-MSG", "the game's HUD is there", false, hud == null ? "no AbilityHUD" : "no bottom line"); yield break; }
+            int oldPriority = NativeUI.Priority;
+            AbilityHUD.HUDMessage gameMsg = null, block = null;
+            NativeUI.Reset(); CoopUI.ClearOverlayToastsForTest();
+            Check("HUD-MSG", "in the world the M.O.M panel can take co-op messages", NativeUI.CanShow(), "hidden=" + CoopUI.Hidden + " timeScale=" + Time.timeScale + " allow=" + AbilityHUD.s_allowVisibility + " menu=" + (Singleton<GUIManager>.Exists && Singleton<GUIManager>.Instance.AnyMenuActive));
+
+            // a game message is on the panel; ours (made more important for the test) pushes it aside, then it must come back
+            gameMsg = new AbilityHUD.HUDMessage("AuditGameMsg", true, 0, AbilityHUD.HUDFlags.SideHint);
+            gameMsg.m_sideAlertText = ""; gameMsg.m_stringTop = "M.O.M"; gameMsg.m_stringBottom = "AUDIT GAME MESSAGE";
+            AbilityHUD.ShowHUDMessage(gameMsg);
+            yield return null;
+            NativeUI.Priority = -1000;
+            string one = "AUDIT HUD MESSAGE ONE";
+            float momBefore = NativeUI.MomTimerForTest;
+            CoopUI.Toast(one);
+            bool shown = false; float t0 = Time.realtimeSinceStartup;
+            while (Time.realtimeSinceStartup - t0 < 2f) { if (hud.m_textBottomLine.text == one && NativeUI.IsCurrent(NativeUI.ActiveName ?? "")) { shown = true; break; } yield return null; }
+            Check("HUD-MSG", "a co-op message appears in the game's own M.O.M panel, not on the overlay", shown && !CoopUI.OverlayToastsForTest().Contains(one),
+                "panel says \"" + hud.m_textBottomLine.text + "\", panel on=" + (hud.m_sideHintPanel != null && hud.m_sideHintPanel.gameObject.activeInHierarchy) + ", overlay=" + CoopUI.OverlayToastsForTest().Count);
+            float momAfter = NativeUI.MomTimerForTest;
+            Check("HUD-MSG", "a co-op message does not hold back the game's own M.O.M prompts (their timer is left as it was)", !float.IsNaN(momBefore) && momAfter == momBefore, "timer " + momBefore + " -> " + momAfter);
+            t0 = Time.realtimeSinceStartup;
+            while (NativeUI.Busy && Time.realtimeSinceStartup - t0 < NativeUI.ShowSeconds + 3f) yield return null;
+            yield return null;
+            Check("HUD-MSG", "a message disappears after its time and the game's message that was pushed aside comes back", !NativeUI.Busy && NativeUI.IsCurrent("AuditGameMsg") && hud.m_textBottomLine.text == "AUDIT GAME MESSAGE",
+                "busy=" + NativeUI.Busy + " game message current=" + NativeUI.IsCurrent("AuditGameMsg") + " panel says \"" + hud.m_textBottomLine.text + "\"");
+            AbilityHUD.HideHUDMessage("AuditGameMsg");
+            yield return null;
+
+            // a burst: every message is shown, in order, none on the overlay, without a long queue
+            CoopUI.ClearOverlayToastsForTest();
+            string[] burst = { "AUDIT BURST A", "AUDIT BURST B", "AUDIT BURST C" };
+            foreach (var b in burst) CoopUI.Toast(b);
+            var seen = new List<string>(); t0 = Time.realtimeSinceStartup;
+            while (Time.realtimeSinceStartup - t0 < 18f)
+            {
+                string now = hud.m_textBottomLine.text;
+                if (Array.IndexOf(burst, now) >= 0 && (seen.Count == 0 || seen[seen.Count - 1] != now)) seen.Add(now);
+                if (!NativeUI.Busy) break;
+                yield return null;
+            }
+            float took = Time.realtimeSinceStartup - t0;
+            Check("HUD-MSG", "three messages at once are all shown in the panel one after another, in order, none lost, in under 14 s", string.Join("|", seen.ToArray()) == string.Join("|", burst) && CoopUI.OverlayToastsForTest().Count == 0 && took < 14f,
+                "seen " + string.Join(", ", seen.ToArray()) + " in " + took.ToString("F1") + " s, overlay " + CoopUI.OverlayToastsForTest().Count);
+            NativeUI.Priority = oldPriority;
+
+            // the panel is held by a more important game message: ours goes to the overlay after a short wait and the game's message stays
+            CoopUI.ClearOverlayToastsForTest();
+            block = new AbilityHUD.HUDMessage("AuditBlock", true, 0, AbilityHUD.HUDFlags.SideHint);
+            block.m_sideAlertText = ""; block.m_stringTop = "M.O.M"; block.m_stringBottom = "AUDIT BLOCK";
+            AbilityHUD.ShowHUDMessage(block);
+            yield return null;
+            CoopUI.Toast("AUDIT WAITS"); CoopUI.Toast("AUDIT WAITS 2"); CoopUI.Toast("AUDIT WAITS 3");
+            t0 = Time.realtimeSinceStartup;
+            while (Time.realtimeSinceStartup - t0 < NativeUI.WaitLimit + 2f && !CoopUI.OverlayToastsForTest().Contains("AUDIT WAITS 3")) yield return null;
+            yield return null;
+            var ov = CoopUI.OverlayToastsForTest();
+            Check("HUD-MSG", "when an important game message holds the panel, co-op messages (all of a burst, together) go to the overlay within a few seconds and the game's message stays", ov.Contains("AUDIT WAITS") && ov.Contains("AUDIT WAITS 2") && ov.Contains("AUDIT WAITS 3") && !NativeUI.Busy && NativeUI.IsCurrent("AuditBlock") && hud.m_textBottomLine.text == "AUDIT BLOCK",
+                "overlay " + string.Join(", ", ov.ToArray()) + " after " + (Time.realtimeSinceStartup - t0).ToString("F1") + " s, busy=" + NativeUI.Busy + " block current=" + NativeUI.IsCurrent("AuditBlock"));
+            AbilityHUD.HideHUDMessage("AuditBlock");
+            yield return null;
+
+            // the game's own M.O.M prompt is on the panel: co-op messages leave it alone and use the overlay
+            CoopUI.ClearOverlayToastsForTest();
+            var prompt = new AbilityHUD.HUDMessage(NativeUI.MomPromptName, true, 0, AbilityHUD.HUDFlags.SideHint);
+            prompt.m_sideAlertText = ""; prompt.m_stringTop = "M.O.M"; prompt.m_stringBottom = "AUDIT MOM PROMPT";
+            AbilityHUD.ShowHUDMessage(prompt);
+            yield return null;
+            CoopUI.Toast("AUDIT NEAR PROMPT");
+            Check("HUD-MSG", "while the game's own M.O.M prompt is on the panel, a co-op message goes to the overlay and the prompt stays", CoopUI.OverlayToastsForTest().Contains("AUDIT NEAR PROMPT") && !NativeUI.Busy && NativeUI.IsCurrent(NativeUI.MomPromptName),
+                "overlay=" + CoopUI.OverlayToastsForTest().Contains("AUDIT NEAR PROMPT") + " prompt current=" + NativeUI.IsCurrent(NativeUI.MomPromptName));
+            AbilityHUD.HideHUDMessage(NativeUI.MomPromptName);
+
+            // the game stopped (or a menu open): straight to the overlay
+            CoopUI.ClearOverlayToastsForTest();
+            float scale = Time.timeScale;
+            Time.timeScale = 0f;
+            CoopUI.Toast("AUDIT STOPPED");
+            bool direct = CoopUI.OverlayToastsForTest().Contains("AUDIT STOPPED") && !NativeUI.Busy;
+            Time.timeScale = scale;
+            Check("HUD-MSG", "while the game is stopped the message goes straight to the overlay", direct, "");
+            NativeUI.Reset(); CoopUI.ClearOverlayToastsForTest();
+            Note("HUD messages: " + NativeUI.NativeShown + " shown in the game's panel, " + NativeUI.OverlayUsed + " on the overlay");
+        }
+
+        static bool Inside(RectTransform inner, RectTransform outer, float slack)
+        {
+            var a = new Vector3[4]; var b = new Vector3[4];
+            inner.GetWorldCorners(a); outer.GetWorldCorners(b);
+            float minX = Mathf.Min(b[0].x, b[2].x) - slack, maxX = Mathf.Max(b[0].x, b[2].x) + slack, minY = Mathf.Min(b[0].y, b[2].y) - slack, maxY = Mathf.Max(b[0].y, b[2].y) + slack;
+            foreach (var p in a) if (p.x < minX || p.x > maxX || p.y < minY || p.y > maxY) return false;
+            return true;
+        }
+
+        static string Ids(List<CoopMenu.Row> rows) { var l = new List<string>(); foreach (var r in rows) l.Add(r.Id); return string.Join(",", l.ToArray()); }
+
+        // The CO-OP menu: built into the game's menus, reached from the pause menu, its lines follow the state and do what they say, Back and cancel
+        // return to the pause menu, lines that need typing leave the menus and open their window.
+        IEnumerator TestCoopMenu()
+        {
+            // the lines for every state (pure)
+            string a, b;
+            var s = new CoopMenu.State();
+            bool offline = Ids(CoopMenu.RowsFor(s, out a, out b)) == "back" && a.Contains("STEAM");
+            s.Online = true;
+            bool lobbyless = Ids(CoopMenu.RowsFor(s, out a, out b)) == "host_friends,host_public,host_accept,host_private,join,display,back";
+            s.Busy = true;
+            bool busy = Ids(CoopMenu.RowsFor(s, out a, out b)) == "display,back";
+            s.Busy = false;
+            s.InLobby = true; s.Code = "ABCDE12345FGH"; s.InWorld = true; s.HostConnected = true;
+            var inRoom = CoopMenu.RowsFor(s, out a, out b);
+            bool guest = Ids(inRoom) == "friends,copy,chat,rejoin,leave,display,back" && a.Contains("ABCDE12345FGH");
+            s.IsHost = true;
+            bool host = Ids(CoopMenu.RowsFor(s, out a, out b)) == "friends,copy,chat,leave,display,back";
+            s.Pending = "A VERY LONG PLAYER NAME";      // only a host gets join requests
+            bool pend = Ids(CoopMenu.RowsFor(s, out a, out b)) == "let_in,refuse,friends,copy,chat,leave,back";
+            s.IsHost = false;
+            var crowded = CoopMenu.RowsFor(s, out a, out b);
+            pend = pend && crowded.Count <= CoopMenu.MaxRows && crowded[crowded.Count - 1].Id == "back";
+            s.Players = "ANA, BOB, CARL +4"; s.Status = new string('X', 200);
+            CoopMenu.RowsFor(s, out a, out b);
+            bool shortLines = a.Length <= 34 && b.Length <= 44;
+            Check("COOP-MENU", "the menu offers the right lines in every state (offline, no party, guest, host, someone waiting), at most 7, BACK last, status lines short",
+                offline && lobbyless && busy && guest && host && pend && shortLines, "offline=" + offline + " noParty=" + lobbyless + " connecting=" + busy + " guest=" + guest + " host=" + host + " waiting=" + pend + " short=" + shortLines);
+
+            var cb = GetComponent<CoopBehaviour>();
+            var gm = Singleton<GUIManager>.Exists ? Singleton<GUIManager>.Instance : null;
+            GUIMenu pause = gm == null ? null : CoopMenu.Find(gm, "PauseMenu");
+            var menu = CoopMenu.Menu;
+            var handler = menu == null ? null : menu.GetComponent<CoopMenuHandler>();
+            bool built = gm != null && pause != null && menu != null && gm.m_Menus.Contains(menu) && handler != null && menu.GetComponents<GUIHandler>().Length == 1 && CoopMenu.Entry != null;
+            Transform settings = pause == null ? null : pause.transform.Find("AspectKeeper/MenuGroupPanel/ButtonCamera");
+            bool placed = built && settings != null && CoopMenu.Entry.transform.parent == settings.parent && CoopMenu.Entry.transform.GetSiblingIndex() == settings.GetSiblingIndex() + 1
+                && CoopMenu.Entry.transform.Find("ButText").GetComponent<UnityEngine.UI.Text>().text == "CO-OP";
+            Check("COOP-MENU", "a CO-OP menu is made from the game's own Settings menu, and a CO-OP line sits right under Settings in the pause menu", built && placed,
+                "built=" + built + " placed=" + placed + " builds=" + CoopMenu.Builds + (CoopMenu.LastProblem.Length > 0 ? " problem: " + CoopMenu.LastProblem : ""));
+            if (!built || !placed || cb == null) yield break;
+
+            bool pauseOpened = false;
+            try { gm.ActivateMenu("PauseMenu"); pauseOpened = true; }
+            catch (Exception e) { Check("COOP-MENU", "the pause menu opens", false, Describe(e)); }
+            if (!pauseOpened) yield break;
+            yield return null;
+            bool entryOk = CoopMenu.Entry.gameObject.activeInHierarchy && CoopMenu.Entry.interactable;
+            CoopMenu.Entry.onClick.Invoke();
+            yield return null; yield return null;
+            string expect1, expect2;
+            var expected = CoopMenu.RowsFor(cb.CoopMenuState(), out expect1, out expect2);
+            var shown = handler.RowIdsForTest;
+            bool open = menu.gameObject.activeInHierarchy && !pause.gameObject.activeInHierarchy && gm.AnyMenuActive;
+            bool rowsOk = string.Join(",", shown.ToArray()) == Ids(expected);
+            string layout = RowsLayout(handler, expected, menu);
+            bool selected = MenuSelected(handler, menu);
+            Check("COOP-MENU", "pressing CO-OP in the pause menu opens the co-op menu with the lines for my state, labelled, inside the menu panel, the first line selected (keyboard and controller work)",
+                entryOk && open && rowsOk && layout.Length == 0 && selected,
+                "entry=" + entryOk + " open=" + open + " rows " + string.Join(",", shown.ToArray()) + " (want " + Ids(expected) + ") layout " + (layout.Length == 0 ? "ok" : layout) + " selected=" + selected + "; title \"" + (handler.Title != null ? handler.Title.text : "") + "\" says \"" + expect1 + "\" / \"" + expect2 + "\"");
+
+            // CO-OP DISPLAY switches the overlay both ways and the line follows
+            var display = handler.ButtonFor("display");
+            if (display != null)
+            {
+                bool was = CoopUI.Hidden;
+                display.onClick.Invoke(); yield return null;
+                display = handler.ButtonFor("display");
+                bool flipped = display != null && CoopUI.Hidden != was && display.transform.Find("ButText").GetComponent<UnityEngine.UI.Text>().text == (CoopUI.Hidden ? "CO-OP DISPLAY: OFF" : "CO-OP DISPLAY: ON");
+                if (display != null) display.onClick.Invoke();
+                yield return null;
+                Check("COOP-MENU", "the CO-OP DISPLAY line switches the co-op overlay off and on again, and its label follows", flipped && CoopUI.Hidden == was, "flipped=" + flipped + " back=" + (CoopUI.Hidden == was));
+            }
+            else Check("COOP-MENU", "the CO-OP DISPLAY line is there when Steam is running", !cb.CoopMenuState().Online, "online=" + cb.CoopMenuState().Online);
+
+            // a line that just changed what it does ignores a press for a moment (a press meant for its old meaning must not let somebody in)
+            yield return StartCoroutine(WaitReal(CoopMenuHandler.SettleTime + 0.1f));
+
+            // BACK and the cancel key return to the pause menu
+            var back = handler.ButtonFor("back");
+            if (back == null) { Check("COOP-MENU", "the menu has a BACK line", false, "rows " + string.Join(",", handler.RowIdsForTest.ToArray())); gm.CloseAllMenus(); yield break; }
+            back.onClick.Invoke();
+            yield return null;
+            bool backOk = pause.gameObject.activeInHierarchy && !menu.gameObject.activeInHierarchy;
+            CoopMenu.Entry.onClick.Invoke(); yield return null;
+            bool reopened = menu.gameObject.activeInHierarchy;
+            handler.OnMenuCancel(); yield return null;
+            bool cancelOk = pause.gameObject.activeInHierarchy && !menu.gameObject.activeInHierarchy;
+            Check("COOP-MENU", "BACK and the cancel key (Esc / B) go back to the pause menu, and the co-op menu opens again after that", backOk && reopened && cancelOk, "back=" + backOk + " reopened=" + reopened + " cancel=" + cancelOk);
+
+            // JOIN A PARTY leaves the menus and opens the join window (typing needs it)
+            if (cb.CoopMenuState().Online && !cb.CoopMenuState().InLobby)
+            {
+                CoopMenu.Entry.onClick.Invoke(); yield return null;
+                yield return StartCoroutine(WaitReal(CoopMenuHandler.SettleTime + 0.1f));
+                var jb = handler.ButtonFor("join");
+                if (jb != null) jb.onClick.Invoke();
+                float t0 = Time.realtimeSinceStartup;
+                while (!cb.JoinOpenForTest && Time.realtimeSinceStartup - t0 < 2f) yield return null;
+                bool joined = cb.JoinOpenForTest && !gm.AnyMenuActive;
+                cb.CloseJoinForTest();
+                yield return null;
+                Check("COOP-MENU", "JOIN A PARTY closes the menus and opens the join window (code and party list), and the game gets the keys back when it closes", jb != null && joined && !cb.JoinOpenForTest && !gm.AnyMenuActive, "line=" + (jb != null) + " opened=" + joined);
+            }
+            else Check("COOP-MENU", "JOIN A PARTY is offered when Steam is running and I am not in a party", !cb.CoopMenuState().Online || cb.CoopMenuState().InLobby, "");
+            if (gm.AnyMenuActive) gm.CloseAllMenus();
+        }
+
+        // Game time stands still on the start screen, so waits there use real time.
+        static IEnumerator WaitReal(float seconds) { float end = Time.realtimeSinceStartup + seconds; while (Time.realtimeSinceStartup < end) yield return null; }
+
+        // Every line of the menu as the player sees it: the expected label, a font, inside the menu panel, the panel on screen, lines not on top of each other,
+        // a label that fits its line, and member lines that can never be selected. Returns "" when all is well, else what is wrong.
+        static string RowsLayout(CoopMenuHandler handler, List<CoopMenu.Row> expected, GUIMenu menu)
+        {
+            var problems = new List<string>();
+            var rows = handler.RowObjectsForTest; var texts = handler.RowTextsForTest; var inert = handler.RowInertForTest;
+            var group = handler.Group as RectTransform;
+            if (rows.Count != expected.Count) problems.Add(rows.Count + " lines, want " + expected.Count);
+            if (group != null && !Inside(group, (RectTransform)menu.transform, 2f)) problems.Add("panel off screen");
+            float lastBottom = float.MaxValue;
+            for (int i = 0; i < rows.Count && i < expected.Count; i++)
+            {
+                var go = rows[i];
+                if (!go.activeInHierarchy) { problems.Add(i + " hidden"); continue; }
+                var t = texts[i];
+                if (t == null || t.text != expected[i].Label || t.font == null) problems.Add(i + " label \"" + (t == null ? "" : t.text) + "\"");
+                else if (t.preferredWidth > ((RectTransform)t.transform).rect.width + 2f) problems.Add(i + " label too wide (" + t.preferredWidth.ToString("F0") + " > " + ((RectTransform)t.transform).rect.width.ToString("F0") + ")");
+                if (group != null && !Inside((RectTransform)go.transform, group, 2f)) problems.Add(i + " outside the panel");
+                if (inert[i] != expected[i].Inert) problems.Add(i + " inert=" + inert[i]);
+                if (inert[i] && go.GetComponent<UnityEngine.UI.Selectable>() != null) problems.Add(i + " member line selectable");
+                var c = new Vector3[4]; ((RectTransform)go.transform).GetWorldCorners(c);
+                float top = Mathf.Max(c[0].y, c[1].y), bottom = Mathf.Min(c[0].y, c[1].y);
+                if (top > lastBottom + 0.01f * Mathf.Abs(top - bottom) + 0.001f) problems.Add(i + " overlaps the line above");
+                lastBottom = bottom;
+            }
+            return string.Join("; ", problems.ToArray());
+        }
+
+        // the first line the player can press is the menu's default, and the selection is on a line of this menu
+        static bool MenuSelected(CoopMenuHandler handler, GUIMenu menu)
+        {
+            var es = UnityEngine.EventSystems.EventSystem.current;
+            UnityEngine.UI.Button first = null;
+            var rows = handler.RowObjectsForTest; var inert = handler.RowInertForTest;
+            for (int i = 0; i < rows.Count; i++) if (!inert[i]) { first = rows[i].GetComponent<UnityEngine.UI.Button>(); break; }
+            return es != null && first != null && ((UnityGUIMenu)menu).m_defaultSelection == first.gameObject
+                && es.currentSelectedGameObject != null && es.currentSelectedGameObject.activeInHierarchy && es.currentSelectedGameObject.transform.IsChildOf(menu.transform)
+                && es.currentSelectedGameObject.GetComponent<UnityEngine.UI.Selectable>() != null;
+        }
+
+        static List<Party.Member> TestMembers(int count)
+        {
+            var names = new[] { "TRICKER", "POINT", "A VERY LONG STEAM NAME", "EVE", "BOB", "ANA", "CARL", "DAN" };
+            var list = new List<Party.Member>();
+            for (int i = 0; i < count; i++) list.Add(new Party.Member { Id = 100UL + (ulong)i, Name = names[i % names.Length], Leader = i == 0, Me = i == 0, Ready = i == 1 || i == 4, Waiting = i == 2 });
+            return list;
+        }
+
+        static List<Party.Friend> TestFriends(int count)
+        {
+            var list = new List<Party.Friend>();
+            for (int i = 0; i < count; i++) list.Add(new Party.Friend { Id = 500UL + (ulong)i, Name = "FRIEND " + (char)('A' + i), InGame = i % 3 == 0, Invited = i == 1 });
+            return list;
+        }
+
+        static bool AllCapped(List<CoopMenu.Row> rows)
+        {
+            int actions = 0;
+            foreach (var r in rows) if (!r.Inert) actions++;
+            return actions <= CoopMenu.MaxRows && rows.Count > 0 && rows[rows.Count - 1].Id == "back";
+        }
+
+        // The party rules and the party menu's lines for every state (pure).
+        void CheckParty()
+        {
+            bool follow = Party.ShouldFollow(true, false, true, false, "3", null) && Party.ShouldFollow(true, false, true, false, "4", "3")
+                && !Party.ShouldFollow(true, false, true, false, "3", "3") && !Party.ShouldFollow(false, false, true, false, "3", null)
+                && !Party.ShouldFollow(true, true, true, false, "3", null) && !Party.ShouldFollow(true, false, false, false, "3", null)
+                && !Party.ShouldFollow(true, false, true, true, "3", null) && !Party.ShouldFollow(true, false, true, false, "", null) && !Party.ShouldFollow(true, false, true, false, null, null);
+            bool play = Party.PlayFor(true, false, "", 3) == "4" && Party.PlayFor(true, false, "4", 9) == "4" && Party.PlayFor(false, true, "4", 4) == "" && Party.PlayFor(false, false, "4", 4) == "4"
+                && Party.PlayFor(true, true, null, 0) == "1" && Party.PlayFor(true, false, "", -7) == "1" && Party.ParseRound("x") == 0 && Party.ParseRound("-5") == 0 && Party.ParseRound("12") == 12 && Party.ParseRound(null) == 0;
+            Check("PARTY", "members follow the leader in only when the leader starts a game they have not seen started, once let in, never the leader, never twice; the leader's game number goes up each start and is cleared on the start screen",
+                follow && play, "follow=" + follow + " play=" + play);
+
+            var members = TestMembers(4);
+            var shuffled = new List<Party.Member> { members[2], members[0], members[3], members[1] };
+            var ordered = Party.Ordered(shuffled);
+            bool roster = ordered[0].Leader && ordered.Count == 4 && Party.RosterLabel(members[0]) == "TRICKER (YOU)  LEADER" && Party.RosterLabel(members[1]) == "POINT  READY"
+                && Party.RosterLabel(members[2]) == "A VERY LONG ST  WAITING" && Party.RosterLabel(members[3]) == "EVE" && Party.ReadyCount(members) == 1 && Party.ReadyCount(null) == 0
+                && Party.RosterLabel(new Party.Member { Name = null }) == "PLAYER";
+            var sorted = Party.SortFriends(new List<Party.Friend> { new Party.Friend { Name = "zed" }, new Party.Friend { Name = "Bea", InGame = true }, new Party.Friend { Name = "amy" }, new Party.Friend { Name = "Cy", InGame = true } });
+            bool friends = sorted[0].Name == "Bea" && sorted[1].Name == "Cy" && sorted[2].Name == "amy" && sorted[3].Name == "zed" && Party.SortFriends(null).Count == 0
+                && Party.Pages(0) == 1 && Party.Pages(4) == 1 && Party.Pages(5) == 2 && Party.Pages(9) == 3;
+            Check("PARTY", "the member list puts the leader first and shows who is me, ready or waiting, long names cut short; friends playing Grow Home come first, by name; friends come in pages of 4",
+                roster && friends, "roster=" + roster + " friends=" + friends + " labels: " + Party.RosterLabel(members[0]) + " / " + Party.RosterLabel(members[2]));
+
+            string a, b;
+            var problems = new List<string>();
+            var s = new CoopMenu.State { AtStart = true };
+            var r = CoopMenu.RowsFor(s, out a, out b);
+            if (Ids(r) != "back" || !a.Contains("STEAM")) problems.Add("offline " + Ids(r));
+            s.Online = true;
+            r = CoopMenu.RowsFor(s, out a, out b);
+            if (Ids(r) != "host_friends,host_public,join,back") problems.Add("no party " + Ids(r));
+            s.Invite = "EVE";
+            r = CoopMenu.RowsFor(s, out a, out b);
+            if (r[0].Id != "accept_invite" || r[0].Label != "JOIN EVE'S PARTY") problems.Add("invite " + Ids(r));
+            s.Invite = ""; s.Busy = true;
+            if (Ids(CoopMenu.RowsFor(s, out a, out b)) != "back") problems.Add("connecting");
+            s.Busy = false; s.InLobby = true; s.IsHost = true; s.Code = "ABCD-EFGH-JKLMN"; s.Leader = "TRICKER"; s.Members = TestMembers(3); s.Pending = "EVE";
+            r = CoopMenu.RowsFor(s, out a, out b);
+            if (Ids(r) != "member,member,member,let_in,refuse,start,friends,copy,leave,back" || !r[0].Inert || r[3].Inert) problems.Add("leader " + Ids(r));
+            if (r.Count > 5 && r[5].Label != "START GAME  1/2 READY") problems.Add("start label " + r[5].Label);
+            if (!b.Contains("3 PLAYERS") || !a.Contains("ABCD-EFGH-JKLMN")) problems.Add("leader lines " + a + " / " + b);
+            s.Members = TestMembers(1); s.Pending = "";
+            r = CoopMenu.RowsFor(s, out a, out b);
+            if (Ids(r) != "member,start,friends,copy,leave,back" || r[1].Label != "START GAME") problems.Add("alone " + Ids(r));
+            s.Members = TestMembers(7);
+            r = CoopMenu.RowsFor(s, out a, out b);
+            if (Ids(r) != "member,member,member,more,start,friends,copy,leave,back" || r[3].Label != "+4 MORE" || !r[3].Inert) problems.Add("big party " + Ids(r));
+            s.IsHost = false; s.Members = TestMembers(3);
+            r = CoopMenu.RowsFor(s, out a, out b);
+            if (Ids(r) != "member,member,member,ready,friends,copy,leave,back" || r[3].Label != "READY: NO") problems.Add("guest " + Ids(r));
+            s.Ready = true;
+            if (CoopMenu.RowsFor(s, out a, out b)[3].Label != "READY: YES") problems.Add("ready yes");
+            s.HostPlaying = true;
+            if (Ids(CoopMenu.RowsFor(s, out a, out b)) != "member,member,member,follow,friends,copy,leave,back") problems.Add("leader playing");
+            s.Waiting = true;
+            r = CoopMenu.RowsFor(s, out a, out b);
+            if (Ids(r) != "member,member,member,friends,copy,leave,back" || !b.Contains("LET YOU IN")) problems.Add("waiting " + Ids(r) + " / " + b);
+            s.Waiting = false; s.Page = "friends"; s.Friends = TestFriends(9);
+            r = CoopMenu.RowsFor(s, out a, out b);
+            if (Ids(r) != "invite:500,invite:501,invite:502,invite:503,friends_more,back" || r[1].Label != "INVITED FRIEND B" || r[0].Label != "INVITE FRIEND A" || !b.Contains("PAGE 1 OF 3")) problems.Add("friends " + Ids(r) + " / " + b);
+            s.FriendPage = 2;
+            if (Ids(CoopMenu.RowsFor(s, out a, out b)) != "invite:508,friends_more,back") problems.Add("friends page 3");
+            s.FriendPage = 99;
+            if (Ids(CoopMenu.RowsFor(s, out a, out b)) != "invite:508,friends_more,back") problems.Add("friends page past the end");
+            s.Friends = new List<Party.Friend>();
+            r = CoopMenu.RowsFor(s, out a, out b);
+            if (Ids(r) != "back" || !b.Contains("NO FRIENDS")) problems.Add("no friends " + Ids(r));
+            s.Page = ""; s.Following = true;
+            r = CoopMenu.RowsFor(s, out a, out b);
+            if (Ids(r) != "back" || !a.StartsWith("JOINING TRICKER")) problems.Add("following " + Ids(r) + " / " + a);
+            s.Following = false; s.AtStart = false; s.InWorld = true; s.IsHost = true; s.Members = TestMembers(3);
+            r = CoopMenu.RowsFor(s, out a, out b);
+            if (Ids(r) != "friends,copy,chat,leave,display,back") problems.Add("in the game " + Ids(r));
+            // every state: at most MaxRows lines that do something, BACK last, short status lines
+            foreach (bool start in new[] { true, false })
+                foreach (bool host in new[] { true, false })
+                    foreach (int n in new[] { 0, 1, 4, 5, 16 })
+                    {
+                        var t = new CoopMenu.State { Online = true, AtStart = start, InLobby = n > 0, IsHost = host, InWorld = !start, HostConnected = true, Members = TestMembers(n), Pending = n > 1 ? "SOMEBODY WITH A LONG NAME" : "", Leader = new string('L', 40), Code = "ABCD-EFGH-JKLMN", Invite = new string('I', 40), Status = new string('S', 90) };
+                        var rows = CoopMenu.RowsFor(t, out a, out b);
+                        int lines = 0; foreach (var x in rows) if (x.Inert) lines++;
+                        if (!AllCapped(rows) || a.Length > 34 || b.Length > 44 || lines > Party.MaxShown) problems.Add("state start=" + start + " host=" + host + " n=" + n + ": " + Ids(rows));
+                    }
+            Check("PARTY", "the party menu offers the right lines in every state (no party, an invite, leader, member, ready, leader already playing, waiting to be let in, friends pages, following), member lines first, at most 7 lines that do something, BACK last",
+                problems.Count == 0, problems.Count == 0 ? "" : string.Join("; ", problems.ToArray()));
+        }
+
+        // The party lobby on the start screen, before the audit starts the game: the CO-OP PARTY line, the party menu with the lines for my state, a full
+        // party laid out inside the panel, the friends page and cancel, JOIN from the start screen, my own saves back after a party, players dropped on leaving.
+        // a world file as the game writes it (not compressed, version 91) whose header claims `length` bytes, followed by `body`
+        static byte[] FakeWorld(int length, byte[] body)
+        {
+            var b = new List<byte>();
+            b.Add(0); b.AddRange(BitConverter.GetBytes(91)); b.AddRange(BitConverter.GetBytes(length));
+            if (body != null) b.AddRange(body);
+            return b.ToArray();
+        }
+
+        // my own world file (or the game's built-in one) passes the same check a world from the leader goes through
+        static bool OwnWorldReads(string levels)
+        {
+            try
+            {
+                string f = Path.Combine(levels, Application.loadedLevelName + ".sav");
+                if (File.Exists(f)) return WorldSync.LooksLikeWorld(File.ReadAllBytes(f));
+                var res = Resources.Load("SaveFiles/LevelFiles/" + Application.loadedLevelName) as TextAsset;
+                return res != null && WorldSync.LooksLikeWorld(res.bytes);
+            }
+            catch (Exception) { return false; }
+        }
+
+        IEnumerator TestPartyMenu()
+        {
+            var cb = GetComponent<CoopBehaviour>();
+            var gm = Singleton<GUIManager>.Exists ? Singleton<GUIManager>.Instance : null;
+            var start = gm == null ? null : CoopMenu.Find(gm, "StartMenu");
+            var menu = CoopMenu.Menu;
+            var handler = menu == null ? null : menu.GetComponent<CoopMenuHandler>();
+            var entry = CoopMenu.StartEntry;
+            Transform settings = start == null ? null : start.transform.Find("Panel/ButtonPanel/SettingsButton");
+            bool placed = entry != null && settings != null && entry.transform.parent == settings.parent && entry.transform.GetSiblingIndex() + 1 == settings.GetSiblingIndex()
+                && entry.transform.Find("ButText").GetComponent<UnityEngine.UI.Text>().text == "CO-OP PARTY";
+            bool onScreen = placed && start.gameObject.activeInHierarchy && entry.gameObject.activeInHierarchy && entry.interactable && Inside((RectTransform)entry.transform, (RectTransform)start.transform, 2f);
+            Check("PARTY-MENU", "the start menu has a CO-OP PARTY line right above Settings, on screen and pressable", placed && onScreen && handler != null && cb != null,
+                "placed=" + placed + " onScreen=" + onScreen + " menu=" + (handler != null) + (CoopMenu.LastProblem.Length > 0 ? " problem: " + CoopMenu.LastProblem : ""));
+            if (!placed || !onScreen || handler == null || cb == null) yield break;
+
+            // the party menu for my real state
+            entry.onClick.Invoke();
+            yield return null; yield return null;
+            string l1, l2;
+            var state = cb.CoopMenuState();
+            var expected = CoopMenu.RowsFor(state, out l1, out l2);
+            bool open = menu.gameObject.activeInHierarchy && !start.gameObject.activeInHierarchy && state.AtStart;
+            bool titled = handler.Title != null && handler.Title.text == "PARTY";
+            bool rowsOk = string.Join(",", handler.RowIdsForTest.ToArray()) == Ids(expected);
+            string layout = RowsLayout(handler, expected, menu);
+            bool selected = MenuSelected(handler, menu);
+            Check("PARTY-MENU", "pressing CO-OP PARTY opens the party menu (titled PARTY) with the lines for my state, inside the panel, the first line selected",
+                open && titled && rowsOk && layout.Length == 0 && selected,
+                "open=" + open + " titled=" + titled + " rows " + string.Join(",", handler.RowIdsForTest.ToArray()) + " (want " + Ids(expected) + ") layout " + (layout.Length == 0 ? "ok" : layout) + " selected=" + selected + "; says \"" + l1 + "\" / \"" + l2 + "\"");
+
+            // a full party: member lines, someone waiting, the leader's lines; then a member's lines and the friends page
+            var full = new CoopMenu.State { Online = true, AtStart = true, InLobby = true, IsHost = true, Code = "ABCD-EFGH-JKLMN", Leader = "TRICKER", Members = TestMembers(6), Pending = "A VERY LONG STEAM" };
+            var views = new List<string>();
+            foreach (int k in new[] { 0, 1, 2 })
+            {
+                var t = full;
+                if (k == 1) { t.IsHost = false; t.Pending = ""; t.HostPlaying = true; t.Members = TestMembers(2); }
+                if (k == 2) { t.Page = "friends"; t.Friends = TestFriends(6); }
+                handler.SetStateForTest(t);
+                yield return null; yield return null;
+                var want = CoopMenu.RowsFor(t, out l1, out l2);
+                string lay = RowsLayout(handler, want, menu);
+                bool same = string.Join(",", handler.RowIdsForTest.ToArray()) == Ids(want);
+                bool sel = MenuSelected(handler, menu);
+                if (!same || lay.Length > 0 || !sel) views.Add("view " + k + ": rows " + string.Join(",", handler.RowIdsForTest.ToArray()) + " want " + Ids(want) + " layout " + lay + " selected=" + sel);
+                else views.Add("view " + k + " ok (lines " + handler.LastActionHeight + " high" + (handler.Grown ? ", panel grown" : "") + ")");
+            }
+            handler.ClearStateForTest();
+            yield return null;
+            bool allViews = true; foreach (var v in views) if (!v.Contains(" ok")) allViews = false;
+            Check("PARTY-MENU", "a full party (6 members, someone waiting), a member's view and the friends page all fit: member lines cannot be selected, every line inside the panel and on screen, no line on top of another, labels fit their line",
+                allViews, string.Join(" | ", views.ToArray()));
+
+            // cancel: the friends page goes back to the party page, then the party menu back to the start menu
+            cb.SetMenuPageForTest("friends");
+            handler.OnMenuCancel(); yield return null;
+            bool pageBack = menu.gameObject.activeInHierarchy && !start.gameObject.activeInHierarchy;
+            handler.OnMenuCancel(); yield return null; yield return null;
+            bool closed = !menu.gameObject.activeInHierarchy && start.gameObject.activeInHierarchy && CoopMenu.StartMenuShowing();
+            Check("PARTY-MENU", "cancel (Esc / B) on the friends page goes back to the party page, and from the party page back to the start menu", pageBack && closed, "page=" + pageBack + " closed=" + closed);
+
+            // JOIN A PARTY on the start screen: the join window over the start menu (its clicks paused), and back to the party menu when it closes
+            if (cb.CoopMenuState().Online && !cb.CoopMenuState().InLobby)
+            {
+                entry.onClick.Invoke(); yield return null; yield return null;
+                yield return StartCoroutine(WaitReal(CoopMenuHandler.SettleTime + 0.1f));
+                var jb = handler.ButtonFor("join");
+                if (jb != null) jb.onClick.Invoke();
+                float t0 = Time.realtimeSinceStartup;
+                while (!cb.JoinOpenForTest && Time.realtimeSinceStartup - t0 < 2f) yield return null;
+                yield return null;
+                bool opened = cb.JoinOpenForTest && !menu.gameObject.activeInHierarchy && start.gameObject.activeInHierarchy && cb.MenusFrozenForTest;
+                cb.CloseJoinForTest();
+                t0 = Time.realtimeSinceStartup;
+                while (!menu.gameObject.activeInHierarchy && Time.realtimeSinceStartup - t0 < 3f) yield return null;
+                yield return null;
+                bool returned = menu.gameObject.activeInHierarchy && !cb.JoinOpenForTest && !cb.MenusFrozenForTest && UnityEngine.EventSystems.EventSystem.current != null;
+                handler.OnMenuCancel(); yield return null; yield return null;
+                bool startAgain = CoopMenu.StartMenuShowing();
+                Check("PARTY-MENU", "JOIN A PARTY on the start screen opens the join window over the start menu (the menu's clicks paused behind it), and the party menu comes back when it closes",
+                    jb != null && opened && returned && startAgain, "line=" + (jb != null) + " opened=" + opened + " returned=" + returned + " startMenu=" + startAgain);
+            }
+            else Check("PARTY-MENU", "JOIN A PARTY is offered on the start screen when Steam is running and I am not in a party", !cb.CoopMenuState().Online || cb.CoopMenuState().InLobby, "");
+            if (menu.gameObject.activeInHierarchy) handler.OnMenuCancel();
+            yield return null;
+
+            // after a party: back on the start screen my saves are my own again
+            string ownPlayer = SaveSystem.m_playerSavePath, ownLevels = SaveSystem.m_levelFilesPath;
+            WorldSync.EnterGuestMode();
+            bool entered = WorldSync.GuestMode && SaveSystem.m_levelFilesPath != ownLevels && WorldSync.GuestPathsActive();
+            bool online = cb.CoopMenuState().Online;      // without Steam the mod's party loop does not run: that is a failed check, not something to do by hand
+            float t1 = Time.realtimeSinceStartup;
+            while (online && WorldSync.GuestMode && Time.realtimeSinceStartup - t1 < 3f) yield return null;
+            bool restored = !WorldSync.GuestMode && SaveSystem.m_playerSavePath == ownPlayer && SaveSystem.m_levelFilesPath == ownLevels && !WorldSync.GuestPathsActive();
+            if (WorldSync.GuestMode) WorldSync.LeaveGuestMode();
+            Check("PARTY-LEAVE", "on the start screen without a party a guest's saves go back to their own folder by themselves (the guest copy is never written over them)",
+                online && entered && restored, "online=" + online + " entered=" + entered + " restored=" + restored + " now " + SaveSystem.m_playerSavePath + " | " + SaveSystem.m_levelFilesPath);
+            Check("PARTY-LEAVE", "a world from the network is read once before it is loaded: a damaged one is refused, a real one passes",
+                !WorldSync.LooksLikeWorld(new byte[] { 1, 0, 255, 255, 255, 127, 9, 9, 9, 9, 9, 9 }) && !WorldSync.LooksLikeWorld(null) && OwnWorldReads(ownLevels), "");
+            Check("PARTY-LEAVE", "a world claiming more data than it carries is refused before the game's reader would make room for it (header or any block)",
+                !WorldSync.LooksLikeWorld(FakeWorld(0x7FFFFFFF, null)) && !WorldSync.LooksLikeWorld(FakeWorld(-1, null))
+                && !WorldSync.LooksLikeWorld(FakeWorld(12, new byte[] { 255, 255, 255, 127, 0, 0, 0, 0, 0, 0, 0, 0 }))
+                && !WorldSync.LooksLikeWorld(FakeWorld(12, new byte[] { 0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 0, 0 }))
+                && WorldSync.LooksLikeWorld(FakeWorld(12, new byte[] { 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0 })), "");
+
+            // once a follow has handed over to the game's own start, my saves stay the guest ones until the game is in
+            WorldSync.EnterGuestMode();
+            WorldSync.BeginStart();
+            WorldSync.LeaveGuestMode();
+            yield return StartCoroutine(WaitReal(1f));
+            bool kept = WorldSync.GuestMode && WorldSync.GuestPathsActive();
+            WorldSync.Starting = false;
+            WorldSync.LeaveGuestMode();
+            bool backAfter = !WorldSync.GuestMode && SaveSystem.m_playerSavePath == ownPlayer && SaveSystem.m_levelFilesPath == ownLevels;
+            Check("PARTY-LEAVE", "while the game is starting for a member following the leader, nothing switches the saves back to my own (the leader's world is what loads)", kept && backAfter, "kept=" + kept + " backAfter=" + backAfter);
+
+            // leaving a party drops the players I only had because of it
+            if (cb.CoopMenuState().Online)
+            {
+                cb.AddRoomPeerForTest(Friend);
+                bool added = cb.HasPeerForTest(Friend) && cb.RoomPeerCountForTest == 1;
+                cb.LeavePartyForTest();
+                bool dropped = !cb.HasPeerForTest(Friend) && cb.RoomPeerCountForTest == 0;
+                Check("PARTY-LEAVE", "leaving a party drops the players I only had because of it (their copy in my world, their connection and their link)", added && dropped, "added=" + added + " dropped=" + dropped);
+            }
+            else Check("PARTY-LEAVE", "leaving a party drops its players (needs Steam; Steam is not running)", false, "steam offline");
+            if (!CoopMenu.StartMenuShowing() && menu.gameObject.activeInHierarchy) handler.OnMenuCancel();
+        }
+
         // The watchdog: a game that keeps running frames writes nothing; one that stops is reported after the stall time, and again when it recovers.
         IEnumerator TestWatchdog()
         {

@@ -616,9 +616,10 @@ namespace CoopMod
                 }
                 if (!dirty.Contains(id)) continue;
                 float since; if (!lastSent.TryGetValue(id, out since)) since = -99f;
-                // while it keeps changing send at most every MinResend seconds; once it has been still for a tick, send the final state
+                // while it keeps changing send at most every ResendInterval (3-30 s by size); once it has been still for a tick, send the final state,
+                // but never sooner than MinResend after the last one (a plant that grows in short bursts would otherwise send every second)
                 int lastSize; lastBytes.TryGetValue(id, out lastSize);
-                if (changedThisTick && Time.time - since < ResendInterval(lastSize)) continue;
+                if (Time.time - since < (changedThisTick ? ResendInterval(lastSize) : MinResend)) continue;
                 try
                 {
                     byte[] raw = Serialize(GroupFor(root));

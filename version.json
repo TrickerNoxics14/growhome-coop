@@ -1,7 +1,7 @@
 ﻿{
-    "version":  11,
+    "version":  12,
     "dll":  "https://raw.githubusercontent.com/TrickerNoxics14/growhome-coop/main/CoopMod.dll",
-    "sha256":  "12d87163a04aa18e0f239fa958e8000137c69521edd50a06d10c5d57f581b87a",
-    "notes":  "Fixes the launcher opening the normal game when started from a desktop shortcut (the game is now started the way Steam starts it); adds a Check for updates button; big plants are re-sent less often; a watchdog logs game freezes.",
-    "signature":  "vDddi9cTOGEbnfwC5GQ/W+qLHIr0pRHxW8SPWRGfA/7rw2/+iKe1t3E4LkyKBiJoCEcSMT6GcerlQLvHRVNhnP5je1SJd3ECt5/+0ocKlFN6ZSSWgnmANR7SJVuyzkhVTW3UKix4T7Oj+H/i7SnXX3ZGuwcH+YcosxsLf5WesEtay07O8bKFVw7Exz1ELAop/IBolB9sLNQLtQ+q7CfwrhutxXKj/qU3jL5zIWP2UReJo+3UZloR6kO+dHsXJHrnfzcKSdn8mpMZPUHKYUZ8TJdKyEqF8qBZVjEmZMljQzm6BXfHCuS6ABKafeAClERt2IlHFDUisG5lfPYS5TBbM+oLrp6QuR8DJvjh8ClMEb+a6x+TMxoyd6FA6Qc5fjiOwsLD3+G+VI0Zkqwp+MDcuikAHwAilj3q191+7b342Kq3eHKy7QcQwrAGblmOm5UaRUwQtvpgeMP8869cZIwm8tgEvmew5DYODC0hBWD43vnl6f6fqe0sXyO9ECV4d056"
+    "sha256":  "7a8a6d0872c6fa0e7c436843cc10d05f54cf23ab7b9b34812f1c040e77679aec",
+    "notes":  "Adds a party system on the start screen: host a friends or public party, invite Steam friends, see who is ready, and members follow the leader into their world automatically (their own save stays safe).",
+    "signature":  "YBsCZYknCAhqYF0RjRgzQbrUH9j2r6IWB3a7F0kZncBqqQJ7N3Bz/iP7GBmQ7QUiJCrjQJfuI9J6FI2O6skbp44byWu+bkvIcq3SayWaFbj7W2eiGBohS7/UBbUJoinlNRSiEeyqe+VuP/9yJe7rQaBWUxJxr1krGA1gAKkDQPnBCe8boukaQtnQJfbVCm/zISH/Q1pH6WKsHp0EXlxKhi4hpLrJ9pbW6wAP6CUMmHQyEqxrv+Jivo1UEYIcQNYfowFnxa9VGWPxkOSQfyvaU47iyR9EpSm3wCahdf8+JRnvf4fb7U4tq7PS5+fY3tRN/CojAQE9HoQkjJKgge2qv/fik00xdbAHsMwaD+Y5/R+EThhpx+Zkpmv57yvAWRYfmG//+GsKBLoasSLZ9VkSsYjC3WbOMyTFhfj9CiuLqoECZ0HS/AUocaGBwM1VPOy3QBvksnTCaScQInVroRq0TeKzgc97I5VP/cojtIDcMLJyjylahSkTrS62RCz6X4EE"
 }

@@ -18,7 +18,8 @@ namespace CoopMod
         public uint LastRecvSeq;
         public float LastPacketTime = -999f, ConnectedAt = -999f;
         public bool AutoPulled;
-        public bool Connected { get { return Time.time - LastPacketTime < 2f; } }
+        public bool Connected { get { return Time.realtimeSinceStartup - LastPacketTime < 2f; } }   // real time: game time stands still on the start screen
+        public float LastStateTime = -999f;   // last position packet (the gap figures in the log), apart from pings
 
         public int RemoteSkin = -1, LastAppliedSkin = -1, AppliedForLocalSkin = -1;
         public float NextSkinCheck, LastSkinApply, NextSkinDiag;

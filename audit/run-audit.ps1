@@ -233,7 +233,7 @@ else {
     finally {
         Stop-Game
         # keep the evidence, then put everything back
-        foreach ($f in 'coopmod-steam.log', 'coop-selftest-result.txt') { if (Test-Path (Join-Path $GameDir $f)) { Copy-Item (Join-Path $GameDir $f) (Join-Path $Report ('game-' + $f)) -Force } }
+        foreach ($f in 'coopmod-steam.log', 'coop-selftest-result.txt', 'coopmod-ui.log') { if (Test-Path (Join-Path $GameDir $f)) { Copy-Item (Join-Path $GameDir $f) (Join-Path $Report ('game-' + $f)) -Force } }
         $unityLog = Join-Path $GameDir 'GrowHome_Data\output_log.txt'
         if (Test-Path $unityLog) { Copy-Item $unityLog (Join-Path $Report 'unity-output_log.txt') -Force }
         Get-ChildItem $GameDir -File | Where-Object { $_.Length -lt 2MB } | ForEach-Object { Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue }

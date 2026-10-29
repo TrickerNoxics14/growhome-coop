@@ -107,11 +107,21 @@ namespace CoopMod
         class ToastItem { public string Msg; public float Born; }
         static readonly List<ToastItem> toasts = new List<ToastItem>();
 
+        // Shown in the game's own M.O.M panel when the HUD can show it (NativeUI), otherwise here on the overlay.
         public static void Toast(string message)
         {
-            toasts.Add(new ToastItem { Msg = message.ToUpper(), Born = Time.realtimeSinceStartup });
-            while (toasts.Count > 4) toasts.RemoveAt(0);
+            if (string.IsNullOrEmpty(message)) return;
+            if (!NativeUI.Offer(message.ToUpper())) OverlayToast(message);
         }
+
+        public static void OverlayToast(string message)
+        {
+            toasts.Add(new ToastItem { Msg = message.ToUpper(), Born = Time.realtimeSinceStartup });
+            while (toasts.Count > 6) toasts.RemoveAt(0);     // room for a whole batch handed back by the M.O.M panel (NativeUI keeps at most 6 waiting)
+        }
+
+        public static List<string> OverlayToastsForTest() { var l = new List<string>(); foreach (var t in toasts) l.Add(t.Msg); return l; }
+        public static void ClearOverlayToastsForTest() { toasts.Clear(); }
 
         static void DrawToasts()
         {

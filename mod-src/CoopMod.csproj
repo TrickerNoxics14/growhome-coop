@@ -4,6 +4,7 @@
     <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies.net35" Version="1.0.3" PrivateAssets="all" />
     <Reference Include="UnityEngine"><HintPath>C:/Users/Al-Hammadi/GrowHomeCoop/game/GrowHome_Data/Managed/UnityEngine.dll</HintPath></Reference>
     <Reference Include="Assembly-CSharp"><HintPath>C:/Users/Al-Hammadi/GrowHomeCoop/game/GrowHome_Data/Managed/Assembly-CSharp.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.UI"><HintPath>C:/Users/Al-Hammadi/GrowHomeCoop/game/GrowHome_Data/Managed/UnityEngine.UI.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="Assembly-CSharp-firstpass"><HintPath>C:/Users/Al-Hammadi/GrowHomeCoop/game/GrowHome_Data/Managed/Assembly-CSharp-firstpass.dll</HintPath><Private>false</Private></Reference>
   </ItemGroup>
 </Project>

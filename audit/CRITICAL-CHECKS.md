@@ -108,3 +108,9 @@ It never publishes anything: pushing a new version to GitHub for friends is a se
 | CLOUD-NAMES | game | cloud file names cannot escape the save folder | the rule the mod uses, with hostile names |
 | SETTINGS | exe | every settings option switches the mod and the launcher as shown | the settings page driven with keys, files checked each way |
 | ROOM-DEFAULT | game | the F2 menu Enter key picks the room chosen in the settings | the rule the mod uses |
+| UI-DUMP | game | the game's menus and HUD layout are logged, so the native co-op menu can be built from the real level data | the real GUIManager and HUD of the level |
+| PARTY | game | the party on the start screen behaves like a party in other games: the leader starts, the members follow once, nobody is pulled back in after leaving | the rules the mod uses, and the menu lines for every party state |
+| PARTY-MENU | game | the party lobby is a real menu of the game, reached from the start menu, and every party view fits on screen | the real start menu and the copied Settings menu, driven through their buttons, with full-party states |
+| PARTY-LEAVE | game | a party never leaves a player stuck on somebody else's save, and leaving it really disconnects | the real save paths and the mod's player list |
+| COOP-MENU | game | co-op is reached from the game's own pause menu, through a real game menu | the real pause menu and the copied Settings menu, driven through their buttons |
+| HUD-MSG | game | co-op messages use the game's own M.O.M panel, falling back to the overlay when it cannot show them | the real HUD queue: shown, ordered, pushed-aside game message restored, busy panel, stopped game |
