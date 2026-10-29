@@ -413,6 +413,7 @@ namespace CoopMod
             Check("ROOM-DEFAULT", "the room the F2 menu's Enter key picks is read from the settings: ask = listed and I accept, private = private, anything else = public", RoomRules.RoomChoice("ask") == 4 && RoomRules.RoomChoice("private") == 2 && RoomRules.RoomChoice("") == 1 && RoomRules.RoomChoice("garbage") == 1, "");
             Check("SENDER-ID", "a plant or island is credited to the player whose connection it came from, not to a name written inside the message", sender, "");
             bool cloud = !SaveGuard.SafeCloudName("../x") && !SaveGuard.SafeCloudName("/abs") && !SaveGuard.SafeCloudName("C:x") && !SaveGuard.SafeCloudName("a\\b") && !SaveGuard.SafeCloudName("a/../b") && !SaveGuard.SafeCloudName("") && SaveGuard.SafeCloudName("Levels/GrowHome.sav");
+            Check("PLANT-THROTTLE", "a big plant is re-sent less often than a small one (3 s up to 30 s)", SharedWorld.ResendInterval(5000) <= 3.01f && SharedWorld.ResendInterval(150000) > 9f && SharedWorld.ResendInterval(150000) > SharedWorld.ResendInterval(40000) && SharedWorld.ResendInterval(100000000) <= 30.01f, SharedWorld.ResendInterval(5000) + " / " + SharedWorld.ResendInterval(150000) + " / " + SharedWorld.ResendInterval(100000000) + " s");
             Check("CLOUD-NAMES", "a Steam Cloud file name can never take a save outside the save folder (no .., rooted, drive or back-slash names)", cloud, "");
         }
 
@@ -650,6 +651,7 @@ namespace CoopMod
             yield return StartCoroutine(TestCrystals());
             yield return StartCoroutine(TestTeleporters());
             yield return StartCoroutine(TestRemoteCopy());
+            yield return StartCoroutine(TestWatchdog());
             yield return StartCoroutine(TestFuzz(roots));
             try { CheckGuestIsolation(); } catch (Exception e) { Check("AUDIT-ERROR", "guest isolation checks ran", false, Describe(e)); }
             Finish();
@@ -847,6 +849,24 @@ namespace CoopMod
 
         // Crystals: my collection is announced, a friend's removes the crystal here and counts for the team, a made-up one does nothing.
         // Switching a teleporter on unlocks it for everybody: mine is announced once, a friend's unlocks it here and is not sent back, broken messages do nothing.
+        // The watchdog: a game that keeps running frames writes nothing; one that stops is reported after the stall time, and again when it recovers.
+        IEnumerator TestWatchdog()
+        {
+            string file = Path.Combine(Path.GetTempPath(), "coop-watchdog-test-" + Guid.NewGuid().ToString("N").Substring(0, 8) + ".log");
+            var dog = new Watchdog(file, 1000); dog.Start();
+            for (int i = 0; i < 12; i++) { dog.Beat(); yield return new WaitForSeconds(0.1f); }
+            string quiet = File.Exists(file) ? File.ReadAllText(file) : "";
+            Check("WATCHDOG", "a game that keeps running frames writes nothing", quiet.Length == 0, quiet.Trim());
+            yield return new WaitForSeconds(2.2f);                      // no beats: the test's own "game" has frozen
+            string frozen = File.Exists(file) ? File.ReadAllText(file) : "";
+            Check("WATCHDOG", "a game that stops running frames is reported", frozen.Contains("has not run a frame"), frozen.Trim());
+            dog.Beat(); yield return new WaitForSeconds(0.8f);
+            string back = File.Exists(file) ? File.ReadAllText(file) : "";
+            Check("WATCHDOG", "the recovery is reported too", back.Contains("running again"), back.Trim());
+            dog.Stop();
+            try { File.Delete(file); } catch (Exception) { }
+        }
+
         // A remote player's copy must never grab anything in my world (its hands would pull on my plant and lock my walkster to the branch), and a friend's
         // held-object packet must never move a plant part: the plant is synced by its own updates only.
         IEnumerator TestRemoteCopy()

@@ -1,7 +1,7 @@
 ﻿{
-    "version":  9,
+    "version":  10,
     "dll":  "https://raw.githubusercontent.com/TrickerNoxics14/growhome-coop/main/CoopMod.dll",
-    "sha256":  "39de81f744919d2dd590876ddb2632f9c4f7d07010e565e73847441dcf280848",
-    "notes":  "Adds a Check for updates button to the launcher; friend copies no longer carry a jetpack that disturbed the fuel meter; test timing fixes.",
-    "signature":  "uXOhX3LIE5AKP5TcOf+t/JlwIrrayLVcpaKcFSn1rbnqZe79MrA9j7RvtXIlCDSaIqQJB0/bAEv7NApWezQpS/XwSLizYCBwe6qDz61kTOHeQPSozvILW4r3EuO4zFGWARsB2eUTLbHQuez/IZLABeFhPoxDNCdPNugDJcmBQQz+tdH/UrI9l6YTXP8HrP1vBluP+sk5bXWPONDmnalqa51UwPlALqtAOo+pT3xDoQzD1unaXEeXx20GB0+Y0EnWK85MhdLs8fCu34JGEOTMyTp7ha7khrhJ6/RiWdcmjF8F/QFgOWwZGnRBgrnUGLbZrzQOIpSdQ/pm+cfE+d/VCwPTQV7jJS21Y64y2mWV701a0P29gQSKySNzVJLjhnYjfZ33vQ76QuJQAwiz1vFQXCqu0NrYUqV+TuAzUU0PcCGLNSHodkQi9HXviPgU/9USahwRo4VDizTQFUg5XLMB3LLIxWlN1YuQ6BrvWKwFTkZTxC86gcqZPsa4YG8m/x4l"
+    "sha256":  "8cc549c791170669a0d3367aecd991d272927c59e1c048549a32c6406fedfb3e",
+    "notes":  "Big plants are re-sent less often so a grown beanstalk no longer floods the game; a watchdog logs game freezes; launcher cycles all seven BUD skins.",
+    "signature":  "k9dEXfGSb37iMR3P/62qvvNWbslYjNzIJz2OxxKSMewXUvFzlUmPd/AazfPGCzXq3+H/EnzztUdcAzajuoG783vZdr7c3r0W2uxozLOHWV/uXLI8pK6XbkbG2tIm9C5JvGL7+1B1dLv2rgfgRt7JLgaBAa7n+Zp/04oq308IbOfmhWfwlAQ9N9/adfh1HxIvAOqSh/DhVNCDWWGOu1mJbnuhM4l3DPJkPboqCyQY1gq//Xl3fdFax8EdZt7UlwVpL44yCkETKRmV5itUFOsU35+KvPYcOp+WNBjt6gWcu0A5SKpCVVENOdIE8Om4J2CSm494hC2WOERlvdZRxpzw3TiZEvngNQbfMAnBDkSTJdEbXqP9ythE6osGeLliBoVPAxc2J3bDhVgA40P3Ll07RSaZCg6k82Sd3SHmCLyfSmA8ed3Rtmj0V6gH/2/BUYlwIQKsST2IXFIMRGSmccyBwWZZH73X1JeAkIfUfH2V+fYXcvH8I0KljDFundVt7Ugm"
 }

@@ -294,6 +294,14 @@ static partial class Program
             win.PressKey(Keys.Enter); string r2 = File.Exists(roomFile) ? File.ReadAllText(roomFile).Trim() : "";
             win.PressKey(Keys.Enter); string r3 = File.Exists(roomFile) ? File.ReadAllText(roomFile).Trim() : "";
             bool cycle = r1 == "ask" && r2 == "private" && r3 == "public";
+            {
+                // the skin setting cycles through all seven skins and comes back to where it started; anything unknown reads as Standard
+                string sk = "Standard"; var seen = new System.Collections.Generic.List<string>();
+                for (int i = 0; i < CoopSettings.Skins.Length; i++) { seen.Add(sk); sk = CoopSettings.NextSkin(sk); }
+                string skinDir = Path.Combine(tmp, "skin-test"); Directory.CreateDirectory(skinDir);
+                File.WriteAllText(Path.Combine(skinDir, "coop-skin.txt"), "garbage");
+                Check("SETTINGS", sk == "Standard" && seen.Distinct().Count() == 7 && CoopSettings.ReadSkin(skinDir) == "Standard" && CoopSettings.NextSkin("nonsense") == "Standard", "the BUD skin setting cycles through all seven skins, and unknown text reads as Standard", string.Join(",", seen.ToArray()));
+            }
             Check("SETTINGS", toggles && cycle, "the other settings are plain files that switch both ways, and the room setting cycles public, listed-you-accept, private", "toggles " + toggles + ", room " + r1 + " " + r2 + " " + r3);
         }
     }

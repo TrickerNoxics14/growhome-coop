@@ -161,6 +161,8 @@ namespace CoopMod
         void Update()
         {
             Perf.NewFrame();
+            if (Watchdog.Main == null) { Watchdog.Main = new Watchdog(Here(logName), 5000); Watchdog.Main.Start(); }
+            Watchdog.Main.Beat();
             float frameDt = Time.unscaledDeltaTime;
             if (frameDt > 0.08f && Online && Time.time > 10f && Time.time - lastHitchLog > 1f)
             {

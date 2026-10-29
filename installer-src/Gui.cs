@@ -232,9 +232,9 @@ static partial class Program
             items.Add(new MenuItem { Text = "Check for updates", Value = () => YesNo(!File.Exists(noUpdate)), Click = () => Toggle(noUpdate, "never check") });
             if (IsInstalled) items.Add(new MenuItem
             {
-                Text = "BUD colour",
-                Value = () => "<  " + (File.Exists(skinFile) && File.ReadAllText(skinFile).Trim() == "Oceanic" ? "Blue" : "Red") + "  >",
-                Click = () => { try { bool blue = File.Exists(skinFile) && File.ReadAllText(skinFile).Trim() == "Oceanic"; File.WriteAllText(skinFile, blue ? "Standard" : "Oceanic"); } catch { } Invalidate(); }
+                Text = "BUD skin",
+                Value = () => "<  " + CoopSettings.SkinLabel(CoopSettings.ReadSkin(gameDir)) + "  >",
+                Click = () => { try { File.WriteAllText(skinFile, CoopSettings.NextSkin(CoopSettings.ReadSkin(gameDir))); } catch { } Invalidate(); }
             });
             string hudFile = Path.Combine(gameDir, "coop-ui-hidden.txt");
             string noNames = Path.Combine(gameDir, "coop-noname.txt");

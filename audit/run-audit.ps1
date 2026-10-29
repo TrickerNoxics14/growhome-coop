@@ -198,6 +198,7 @@ else {
             Remove-Item (Join-Path $GameDir $f) -ErrorAction SilentlyContinue
         }
         Copy-Item $ModDll (Join-Path $Managed 'CoopMod.dll') -Force
+        if (Test-Path $savesDir) { Remove-Item $savesDir -Recurse -Force -ErrorAction SilentlyContinue }   # the audit plays a fresh copy of the world (small starting plants), never the owner's grown save; the restore after the run puts that back
         Set-Content (Join-Path $GameDir 'coop-selftest.txt') $(if ($Quick) { 'quick' } else { 'audit' }) -Encoding ascii
         # start the game the way a friend does: open the launcher window; here it presses Play by itself. It must start the co-op copy, confirm that the mod loaded and close again.
         $launcherLog = Join-Path (Split-Path $GameDir -Parent) 'launcher.log'

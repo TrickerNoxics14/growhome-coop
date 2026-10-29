@@ -32,6 +32,10 @@ namespace CoopMod
 
         static readonly Dictionary<string, int> lastSig = new Dictionary<string, int>();
         static readonly Dictionary<string, float> lastSent = new Dictionary<string, float>();
+        static readonly Dictionary<string, int> lastBytes = new Dictionary<string, int>();     // size of the last update sent for each plant (compressed)
+
+        // While a plant keeps growing it is re-sent at most this often: 3 s for a small plant, longer the bigger the last update was (a whole beanstalk is hundreds of KB), never more than 30 s.
+        public static float ResendInterval(int compressedBytes) { return Mathf.Clamp(compressedBytes / 15000f, MinResend, 30f); }
         static readonly Dictionary<string, KeyValuePair<ulong, float>> owner = new Dictionary<string, KeyValuePair<ulong, float>>();   // plant id -> (owner, until)
         static readonly HashSet<string> dirty = new HashSet<string>();
         static readonly List<byte[]> outbox = new List<byte[]>();
@@ -577,7 +581,7 @@ namespace CoopMod
         public static void TestRevert(string rootId, byte[] raw) { InitReflection(); RemovePlantCopy(rootId); LoadUpdate(raw); }
         public static void TestApplyWaiting() { ApplyWaiting(); }
         public static int TestWaiting { get { return waiting.Count; } }
-        public static void TestForget(string rootId) { owner.Remove(rootId); lastSig.Remove(rootId); lastSent.Remove(rootId); dirty.Remove(rootId); }
+        public static void TestForget(string rootId) { owner.Remove(rootId); lastSig.Remove(rootId); lastSent.Remove(rootId); lastBytes.Remove(rootId); dirty.Remove(rootId); }
 
         public static void Tick(ITransport broadcast)
         {
@@ -613,7 +617,8 @@ namespace CoopMod
                 if (!dirty.Contains(id)) continue;
                 float since; if (!lastSent.TryGetValue(id, out since)) since = -99f;
                 // while it keeps changing send at most every MinResend seconds; once it has been still for a tick, send the final state
-                if (changedThisTick && Time.time - since < MinResend) continue;
+                int lastSize; lastBytes.TryGetValue(id, out lastSize);
+                if (changedThisTick && Time.time - since < ResendInterval(lastSize)) continue;
                 try
                 {
                     byte[] raw = Serialize(GroupFor(root));
@@ -622,6 +627,7 @@ namespace CoopMod
                     w.Write(MsgPlant); w.Write(id); w.Write(MyId); w.Write(raw.Length); w.Write(comp.Length); w.Write(Lz.Checksum(raw)); w.Write(comp); WriteKeep(w, root);
                     broadcast.SendReliable(ms.ToArray());
                     lastSent[id] = Time.time;
+                    lastBytes[id] = comp.Length;
                     owner[id] = new KeyValuePair<ulong, float>(MyId, Time.time + OwnerHold);
                     if (!changedThisTick) dirty.Remove(id);
                     CoopBehaviour.Log("shared: sent plant " + id + " (" + raw.Length + " bytes, " + comp.Length + " compressed)");

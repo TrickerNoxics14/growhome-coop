@@ -15,11 +15,13 @@ namespace CoopMod
             frameMs = 0; heavyMs = 0; heavy = "";
         }
 
-        public static void Begin() { sw.Reset(); sw.Start(); }
+        public static volatile bool InMod;      // true while one of the mod's measured sections runs (the watchdog reads it: stuck inside the mod, or somewhere else)
+
+        public static void Begin() { InMod = true; sw.Reset(); sw.Start(); }
 
         public static void End(string name)
         {
-            sw.Stop();
+            sw.Stop(); InMod = false;
             double ms = sw.Elapsed.TotalMilliseconds;
             frameMs += ms;
             if (ms > heavyMs) { heavyMs = ms; heavy = name; }
