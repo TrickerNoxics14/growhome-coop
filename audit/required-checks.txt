@@ -16,6 +16,7 @@ REMOTE-NO-GRAB       | game   | a remote player copy told to grab never grabs an
 CLONE-NO-JETPACK      | game   | a remote player copy has no jetpack of its own, so it cannot disturb my fuel meter
 WATCHDOG              | game   | a frozen game is reported in the log after 5 s (and again when it recovers); a running game writes nothing
 PLANT-THROTTLE        | game   | a big plant is re-sent less often than a small one (3 s up to 30 s), so a grown beanstalk does not flood the main thread and the network
+STEAM-ENV             | game   | the mod puts the Steam app id in the environment first thing, so the game's own Steam check does not hand the launch to the regular game
 PLANT-PART-STEER     | game   | a friend held-object packet never moves a plant part (the plant is synced by its own updates only)
 PLANT-NOLEAK          | game   | sending plants does not pile up the game's after-load callbacks (they later crash on deleted branches)
 PLANT-OWNER           | game   | a received plant is never echoed, a plant a friend is growing is not overwritten, sending resumes afterwards
@@ -25,6 +26,7 @@ CRYSTAL-SYNC          | game   | a crystal I collect is announced, a friend's di
 MSG-FUZZ              | game   | hundreds of broken and hostile messages change nothing, escape nowhere and are never slow
 UPDATE-OFFLINE-FAST   | exe    | a dead or hanging update server delays the start by seconds at most and touches nothing
 UPDATE-BUTTON         | exe    | the home page's Check for updates button checks now (also when automatic checks are off), stages a newer mod, and reports an unreachable server
+LAUNCH-PARENT         | exe    | a program the launcher starts under Steam has steam.exe as its parent, so the game is not sent to the regular game when the launcher was opened from Explorer
 UPDATE-STAGED-APPLY   | exe    | a newer mod is downloaded first, installed at the next start, the old one is kept
 UPDATE-TAMPER-REJECT  | exe    | a download that does not match its SHA-256 is never staged or installed
 UPDATE-NO-DOWNGRADE   | exe    | the same or an older version changes nothing

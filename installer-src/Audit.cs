@@ -35,6 +35,8 @@ static partial class Program
         try { AuditInstall(tmp); } catch (Exception e) { Check("AUDIT-ERROR", false, "the install checks ran to the end", e.GetType().Name + ": " + e.Message); }
         try { AuditGui(tmp, Path.Combine(Path.GetDirectoryName(Path.GetFullPath(auditOut ?? "audit-exe-result.txt")), "window")); } catch (Exception e) { Check("AUDIT-ERROR", false, "the window checks ran to the end", e.GetType().Name + ": " + e.Message + " " + (e.StackTrace ?? "").Split((char)10)[0].Trim()); }
         try { AuditUpdateButton(tmp); } catch (Exception e) { Check("AUDIT-ERROR", false, "the update button checks ran to the end", e.GetType().Name + ": " + e.Message); }
+        try { AuditDirectMarker(tmp); } catch (Exception e) { Check("AUDIT-ERROR", false, "the direct-start marker check ran to the end", e.GetType().Name + ": " + e.Message); }
+        try { AuditStartUnderSteam(tmp); } catch (Exception e) { Check("AUDIT-ERROR", false, "the start-under-steam check ran to the end", e.GetType().Name + ": " + e.Message); }
         try { AuditStartMode(); } catch (Exception e) { Check("AUDIT-ERROR", false, "the start-mode checks ran to the end", e.GetType().Name + ": " + e.Message); }
         try { AuditPatch(tmp, realGame); } catch (Exception e) { Check("AUDIT-ERROR", false, "the patch checks ran to the end", e.GetType().Name + ": " + e.Message); }
         try { Directory.Delete(tmp, true); } catch { }

@@ -225,17 +225,11 @@ static partial class Program
         public void ShowSettings()
         {
             Current = View.Settings; items.Clear(); Selected = 0;
-            string skinFile = Path.Combine(gameDir, "coop-skin.txt");
+
             string introFile = Path.Combine(gameDir, "coop-intro.txt");
             string noUpdate = Path.Combine(installDir, "coop-noupdate.txt");
             items.Add(new MenuItem { Text = "Skip intro screens", Value = () => YesNo(!File.Exists(introFile)), Click = () => Toggle(introFile, "show the intro screens") });
             items.Add(new MenuItem { Text = "Check for updates", Value = () => YesNo(!File.Exists(noUpdate)), Click = () => Toggle(noUpdate, "never check") });
-            if (IsInstalled) items.Add(new MenuItem
-            {
-                Text = "BUD skin",
-                Value = () => "<  " + CoopSettings.SkinLabel(CoopSettings.ReadSkin(gameDir)) + "  >",
-                Click = () => { try { File.WriteAllText(skinFile, CoopSettings.NextSkin(CoopSettings.ReadSkin(gameDir))); } catch { } Invalidate(); }
-            });
             string hudFile = Path.Combine(gameDir, "coop-ui-hidden.txt");
             string noNames = Path.Combine(gameDir, "coop-noname.txt");
             string noChat = Path.Combine(gameDir, "coop-nochat.txt");

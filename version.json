@@ -1,7 +1,7 @@
 ﻿{
-    "version":  10,
+    "version":  11,
     "dll":  "https://raw.githubusercontent.com/TrickerNoxics14/growhome-coop/main/CoopMod.dll",
-    "sha256":  "8cc549c791170669a0d3367aecd991d272927c59e1c048549a32c6406fedfb3e",
-    "notes":  "Big plants are re-sent less often so a grown beanstalk no longer floods the game; a watchdog logs game freezes; launcher cycles all seven BUD skins.",
-    "signature":  "k9dEXfGSb37iMR3P/62qvvNWbslYjNzIJz2OxxKSMewXUvFzlUmPd/AazfPGCzXq3+H/EnzztUdcAzajuoG783vZdr7c3r0W2uxozLOHWV/uXLI8pK6XbkbG2tIm9C5JvGL7+1B1dLv2rgfgRt7JLgaBAa7n+Zp/04oq308IbOfmhWfwlAQ9N9/adfh1HxIvAOqSh/DhVNCDWWGOu1mJbnuhM4l3DPJkPboqCyQY1gq//Xl3fdFax8EdZt7UlwVpL44yCkETKRmV5itUFOsU35+KvPYcOp+WNBjt6gWcu0A5SKpCVVENOdIE8Om4J2CSm494hC2WOERlvdZRxpzw3TiZEvngNQbfMAnBDkSTJdEbXqP9ythE6osGeLliBoVPAxc2J3bDhVgA40P3Ll07RSaZCg6k82Sd3SHmCLyfSmA8ed3Rtmj0V6gH/2/BUYlwIQKsST2IXFIMRGSmccyBwWZZH73X1JeAkIfUfH2V+fYXcvH8I0KljDFundVt7Ugm"
+    "sha256":  "12d87163a04aa18e0f239fa958e8000137c69521edd50a06d10c5d57f581b87a",
+    "notes":  "Fixes the launcher opening the normal game when started from a desktop shortcut (the game is now started the way Steam starts it); adds a Check for updates button; big plants are re-sent less often; a watchdog logs game freezes.",
+    "signature":  "vDddi9cTOGEbnfwC5GQ/W+qLHIr0pRHxW8SPWRGfA/7rw2/+iKe1t3E4LkyKBiJoCEcSMT6GcerlQLvHRVNhnP5je1SJd3ECt5/+0ocKlFN6ZSSWgnmANR7SJVuyzkhVTW3UKix4T7Oj+H/i7SnXX3ZGuwcH+YcosxsLf5WesEtay07O8bKFVw7Exz1ELAop/IBolB9sLNQLtQ+q7CfwrhutxXKj/qU3jL5zIWP2UReJo+3UZloR6kO+dHsXJHrnfzcKSdn8mpMZPUHKYUZ8TJdKyEqF8qBZVjEmZMljQzm6BXfHCuS6ABKafeAClERt2IlHFDUisG5lfPYS5TBbM+oLrp6QuR8DJvjh8ClMEb+a6x+TMxoyd6FA6Qc5fjiOwsLD3+G+VI0Zkqwp+MDcuikAHwAilj3q191+7b342Kq3eHKy7QcQwrAGblmOm5UaRUwQtvpgeMP8869cZIwm8tgEvmew5DYODC0hBWD43vnl6f6fqe0sXyO9ECV4d056"
 }

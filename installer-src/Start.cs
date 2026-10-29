@@ -82,6 +82,11 @@ static partial class Program
         catch { return 0; }
     }
 
+    // Starting the game directly has worked on this PC before: a later failure is then no reason to restart Steam (that changes Steam's launch option), so the launcher just tries once more.
+    static string DirectOkFile { get { return Path.Combine(installDir, "coop-direct-ok.txt"); } }
+    static bool DirectWorkedBefore() { try { return File.Exists(DirectOkFile); } catch { return false; } }
+    static void MarkDirectWorks() { try { if (!File.Exists(DirectOkFile)) File.WriteAllText(DirectOkFile, "starting the game directly has worked on this PC"); } catch { } }
+
     enum Outcome { Loaded, WrongGame, NoGame, GameDied, NoMod }
 
     // Watches until the mod says it loaded, or it is clear that it will not.
@@ -109,6 +114,10 @@ static partial class Program
 
     static void StartDirect()
     {
+        // first choice: the way Steam starts a game (steam.exe as the parent process), which the game's own Steam check accepts whoever opened the launcher
+        int under = StartUnderSteam(Path.Combine(gameDir, "GrowHome.exe"), gameArgs, gameDir, new Dictionary<string, string> { { "SteamAppId", AppId }, { "SteamGameId", AppId } });
+        if (under != 0) { Log("started with steam.exe as its parent (pid " + under + ")"); return; }
+        Log("could not start with steam.exe as the parent; starting the plain way");
         var psi = new ProcessStartInfo(Path.Combine(gameDir, "GrowHome.exe"), gameArgs) { WorkingDirectory = gameDir, UseShellExecute = false };
         psi.EnvironmentVariables["SteamAppId"] = AppId;
         psi.EnvironmentVariables["SteamGameId"] = AppId;
@@ -150,6 +159,7 @@ static partial class Program
         bool borrower = IsBorrower(ManifestText(), account);
         bool viaSteamNow = StartViaSteamFirst();
         Log("steam account " + account + "; borrower=" + borrower + "; start through steam=" + viaSteamNow);
+        Log("environment: SteamAppId=" + Environment.GetEnvironmentVariable("SteamAppId") + ", SteamGameId=" + Environment.GetEnvironmentVariable("SteamGameId") + ", SteamClientLaunch=" + Environment.GetEnvironmentVariable("SteamClientLaunch") + ", SteamOverlayGameId=" + Environment.GetEnvironmentVariable("SteamOverlayGameId") + "; game folder " + gameDir + "; steam_appid.txt " + File.Exists(Path.Combine(gameDir, "steam_appid.txt")));
 
         // 3. Steam has to be running and signed in either way (the game talks to it)
         if (!EnsureSteamLoggedIn(90)) { Say("Steam is not signed in. Open Steam, sign in, then run this again."); return 1; }
@@ -207,6 +217,7 @@ static partial class Program
             case Outcome.Loaded:
                 Progress(100);
                 Say("");
+                if (!throughSteam) MarkDirectWorks();
                 Say("Co-op mod loaded (" + took + " s). In the game: CONTINUE, get into the open world, then F2 (make a code) or F3 (type a code).");
                 Thread.Sleep(1500);
                 return 0;
@@ -214,6 +225,7 @@ static partial class Program
             case Outcome.GameDied:
                 if (!throughSteam && mayFallBack)
                 {
+                    if (DirectWorkedBefore()) { Say("The game closed right after starting. Trying once more (no Steam restart needed)..."); WaitFor(() => RunningGames().Count == 0, 15, null); Thread.Sleep(3000); return LaunchAndVerify(false, borrower, false); }
                     Say("The game closed right after starting. I will try through Steam instead.");
                     return LaunchAndVerify(true, true, false);
                 }
@@ -229,6 +241,7 @@ static partial class Program
             case Outcome.NoGame:
                 Say("");
                 Say("Nothing started within " + took + " seconds.");
+                if (!throughSteam && mayFallBack && DirectWorkedBefore()) { Say("Trying once more..."); Thread.Sleep(3000); return LaunchAndVerify(false, borrower, false); }
                 if (!throughSteam && mayFallBack) { Say("Trying through Steam..."); return LaunchAndVerify(true, borrower, false); }
                 Say("If another computer is playing from the same Steam library right now, Steam Family Sharing blocks the game here. Otherwise check that Steam is signed in.");
                 return 2;

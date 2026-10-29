@@ -12,8 +12,16 @@ namespace CoopMod
     public static class Bootstrap
     {
         static bool started;
+        // The game's start-up code hands the launch back to Steam (which then runs the REGULAR game) when it believes it was not started the Steam way. The app id in the
+        // environment is what it looks for, and this runs before that check: set it here, so a launch from any desktop session finds it.
+        public static void SetSteamEnvironment()
+        {
+            try { Environment.SetEnvironmentVariable("SteamAppId", "323320"); Environment.SetEnvironmentVariable("SteamGameId", "323320"); } catch (Exception) { }
+        }
+
         public static void Init()
         {
+            SetSteamEnvironment();
             if (started) return;
             started = true;
             var go = new GameObject("CoopMod");

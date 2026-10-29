@@ -38,6 +38,7 @@ Where they run: **game** = inside the real game, using the real send/receive cod
 | CLONE-NO-JETPACK | game | a remote player copy has no jetpack of its own, so it cannot disturb my fuel meter | counts the jetpacks on a spawned copy |
 | WATCHDOG | game | a frozen game is reported in the log (and its recovery); a running game writes nothing | runs a watchdog with a 1 s limit, beats, stops beating, beats again |
 | PLANT-THROTTLE | game | a big plant is re-sent less often than a small one (3 s up to 30 s) | asks the resend interval for small and huge updates |
+| STEAM-ENV | game | the mod sets SteamAppId and SteamGameId itself at start-up | clears them, runs the setter, reads them back |
 | PLANT-PART-STEER | game | a friend held-object packet never moves a plant part | sends a held-object packet for a plant part and steps physics |
 | PLANT-NOLEAK | game | sending plants does not pile up the game's after-load callbacks | counts the game's queued callbacks before and after many sends |
 | PLANT-OWNER | game | a received plant is never echoed back; a plant a friend is growing is not overwritten; sending resumes afterwards | simulates a friend's update, then grows locally and watches what is sent |
@@ -47,6 +48,7 @@ Where they run: **game** = inside the real game, using the real send/receive cod
 | MSG-FUZZ | game | hundreds of broken and hostile messages change no plant, escape nowhere, and are never slow | random bytes, truncations of a real update, lying headers, damaged updates |
 | UPDATE-OFFLINE-FAST | exe | a dead or hanging update server delays the start by seconds at most and touches nothing | a server that never answers, and a refused connection |
 | UPDATE-BUTTON | exe | the home page's Check for updates button checks now, stages a newer mod, and reports an unreachable server | runs the button against a throw-away update server and checks each answer |
+| LAUNCH-PARENT | exe | a program started under Steam has steam.exe as its parent | starts a harmless program that way and reads its parent process |
 | UPDATE-STAGED-APPLY | exe | a newer mod is downloaded first, installed at the next start, the old one kept | full stage / apply cycle |
 | UPDATE-TAMPER-REJECT | exe | a download whose SHA-256 does not match is never staged or installed | server hands out other bytes than the manifest promises |
 | UPDATE-NO-DOWNGRADE | exe | the same or an older version changes nothing | manifests with versions 2, 1, 0 while 2 is installed |

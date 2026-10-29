@@ -34,31 +34,6 @@ static class CoopSettings
         }
     }
 
-    // The BUD skins the game has, in the order the settings page cycles through them. The mod reads the name from coop-skin.txt.
-    public static readonly string[] Skins = { "Standard", "Ninja", "Native", "Desert", "Oceanic", "WhyAye", "Facebook" };
-
-    public static string SkinLabel(string skin)
-    {
-        switch (skin) { case "Standard": return "Red"; case "Oceanic": return "Blue"; case "WhyAye": return "Why aye"; default: return skin; }
-    }
-
-    public static string NextSkin(string skin)
-    {
-        int i = Array.IndexOf(Skins, skin);
-        return Skins[(i + 1) % Skins.Length];
-    }
-
-    public static string ReadSkin(string gameDir)
-    {
-        try
-        {
-            string f = Path.Combine(gameDir, "coop-skin.txt");
-            string s = File.Exists(f) ? File.ReadAllText(f).Trim() : "";
-            return Array.IndexOf(Skins, s) >= 0 ? s : "Standard";
-        }
-        catch (Exception) { return "Standard"; }
-    }
-
     public static string ReadRoom(string gameDir)
     {
         try

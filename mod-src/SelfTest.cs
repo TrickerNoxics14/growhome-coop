@@ -414,6 +414,9 @@ namespace CoopMod
             Check("SENDER-ID", "a plant or island is credited to the player whose connection it came from, not to a name written inside the message", sender, "");
             bool cloud = !SaveGuard.SafeCloudName("../x") && !SaveGuard.SafeCloudName("/abs") && !SaveGuard.SafeCloudName("C:x") && !SaveGuard.SafeCloudName("a\\b") && !SaveGuard.SafeCloudName("a/../b") && !SaveGuard.SafeCloudName("") && SaveGuard.SafeCloudName("Levels/GrowHome.sav");
             Check("PLANT-THROTTLE", "a big plant is re-sent less often than a small one (3 s up to 30 s)", SharedWorld.ResendInterval(5000) <= 3.01f && SharedWorld.ResendInterval(150000) > 9f && SharedWorld.ResendInterval(150000) > SharedWorld.ResendInterval(40000) && SharedWorld.ResendInterval(100000000) <= 30.01f, SharedWorld.ResendInterval(5000) + " / " + SharedWorld.ResendInterval(150000) + " / " + SharedWorld.ResendInterval(100000000) + " s");
+            Environment.SetEnvironmentVariable("SteamAppId", null); Environment.SetEnvironmentVariable("SteamGameId", null);
+            Bootstrap.SetSteamEnvironment();
+            Check("STEAM-ENV", "the mod puts the Steam app id in the environment first thing, before the game's own Steam check can send the launch back to Steam", Environment.GetEnvironmentVariable("SteamAppId") == "323320" && Environment.GetEnvironmentVariable("SteamGameId") == "323320", Environment.GetEnvironmentVariable("SteamAppId") + " / " + Environment.GetEnvironmentVariable("SteamGameId"));
             Check("CLOUD-NAMES", "a Steam Cloud file name can never take a save outside the save folder (no .., rooted, drive or back-slash names)", cloud, "");
         }
 

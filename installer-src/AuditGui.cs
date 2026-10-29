@@ -94,6 +94,34 @@ static partial class Program
         }
     }
 
+    // Once starting the game directly has worked, a later failure retries instead of falling back to Steam (and asking to restart it).
+    static void AuditDirectMarker(string tmp)
+    {
+        string realInstall = installDir;
+        installDir = Path.Combine(tmp, "direct-marker"); Directory.CreateDirectory(installDir);
+        try
+        {
+            bool before = DirectWorkedBefore(); MarkDirectWorks(); bool after = DirectWorkedBefore();
+            Check("LAUNCH-DIRECT-FIRST", !before && after, "once starting the game directly has worked, a later failure retries instead of falling back to Steam", "before " + before + ", after " + after);
+        }
+        finally { installDir = realInstall; }
+    }
+
+    // A program the launcher starts "under Steam" really has steam.exe as its parent (this is what keeps the game's own Steam check from sending the launch
+// to the regular game when the launcher was opened from Explorer).
+    static void AuditStartUnderSteam(string tmp)
+    {
+        var steam = System.Diagnostics.Process.GetProcessesByName("steam").FirstOrDefault();
+        if (steam == null) { Check("LAUNCH-PARENT", false, "a program started under Steam has steam.exe as its parent", "Steam is not running"); return; }
+        string cmd = Path.Combine(Environment.SystemDirectory, "cmd.exe");
+        int pid = StartUnderSteam(cmd, "/c ping -n 4 127.0.0.1 >nul", Environment.SystemDirectory, new System.Collections.Generic.Dictionary<string, string> { { "SteamAppId", "323320" } });
+        int parent = pid == 0 ? 0 : ParentPidOf(pid);
+        bool sees = false;
+        try { var p = System.Diagnostics.Process.GetProcessById(pid); sees = !p.HasExited; } catch { }
+        Check("LAUNCH-PARENT", pid != 0 && parent == steam.Id, "a program started under Steam has steam.exe as its parent", "pid " + pid + ", parent " + parent + ", steam " + steam.Id);
+        try { System.Diagnostics.Process.GetProcessById(pid).Kill(); } catch { }
+    }
+
     // Presses the button on the given home-page line and waits (a few seconds at most) until the check has answered and the page shows it.
     static void PressCheck(GameWindow win, int index)
     {
@@ -294,14 +322,6 @@ static partial class Program
             win.PressKey(Keys.Enter); string r2 = File.Exists(roomFile) ? File.ReadAllText(roomFile).Trim() : "";
             win.PressKey(Keys.Enter); string r3 = File.Exists(roomFile) ? File.ReadAllText(roomFile).Trim() : "";
             bool cycle = r1 == "ask" && r2 == "private" && r3 == "public";
-            {
-                // the skin setting cycles through all seven skins and comes back to where it started; anything unknown reads as Standard
-                string sk = "Standard"; var seen = new System.Collections.Generic.List<string>();
-                for (int i = 0; i < CoopSettings.Skins.Length; i++) { seen.Add(sk); sk = CoopSettings.NextSkin(sk); }
-                string skinDir = Path.Combine(tmp, "skin-test"); Directory.CreateDirectory(skinDir);
-                File.WriteAllText(Path.Combine(skinDir, "coop-skin.txt"), "garbage");
-                Check("SETTINGS", sk == "Standard" && seen.Distinct().Count() == 7 && CoopSettings.ReadSkin(skinDir) == "Standard" && CoopSettings.NextSkin("nonsense") == "Standard", "the BUD skin setting cycles through all seven skins, and unknown text reads as Standard", string.Join(",", seen.ToArray()));
-            }
             Check("SETTINGS", toggles && cycle, "the other settings are plain files that switch both ways, and the room setting cycles public, listed-you-accept, private", "toggles " + toggles + ", room " + r1 + " " + r2 + " " + r3);
         }
     }
