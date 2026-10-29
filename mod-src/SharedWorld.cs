@@ -14,6 +14,56 @@ namespace CoopMod
     public static class SharedWorld
     {
         const byte MsgPlant = 4, MsgShard = 5, MsgIsland = 6, MsgTeleporter = 8;
+        const byte MsgPlant2 = 12;           // a plant with its number: [12][id][sender][number][echo of: player u64][echo of: their number i32][the rest as MsgPlant]
+
+        // ---- the leader's plant is the real one ----
+        // In a party the leader numbers every plant it sends. A guest builds on the number it last got from the leader and sends it along; the
+        // leader takes a guest's plant only if it was built on the leader's newest one (else the guest's copy is out of date, and taking it would
+        // remove the leader's newer growth). Whatever the leader takes, it passes on to everybody with a new number; guests take plants only from it.
+        public static ulong LeaderId;                        // the party leader (0: no party, everybody equal as before)
+        static readonly Dictionary<string, int> plantNumber = new Dictionary<string, int>();
+        // (leader) the guest plant I took and pass on unchanged: the guest it came from knows it is its own (and keeps growing instead of being put back)
+        static readonly Dictionary<string, KeyValuePair<ulong, int>> takenFrom = new Dictionary<string, KeyValuePair<ulong, int>>();
+        static readonly Dictionary<string, int> takenSig = new Dictionary<string, int>();
+        // (guest) the number my last sends were built on, and how my plant looked at the first of them (the one the leader takes)
+        static readonly Dictionary<string, int> sentBase = new Dictionary<string, int>();
+        static readonly Dictionary<string, int> sentFirstSig = new Dictionary<string, int>();
+        public static int StatEchoes;
+        static readonly HashSet<string> forced = new HashSet<string>();
+        static float lastStaleLog = -999f;
+        public static int StatStale;
+        static bool IAmLeader { get { return LeaderId != 0 && LeaderId == MyId; } }
+        static bool IAmGuest { get { return LeaderId != 0 && LeaderId != MyId; } }
+        public static void ForceSend(string rootId) { if (rootId != null) forced.Add(rootId); }
+        public static Func<ulong, bool> MayTakeFrom;         // (leader) this player plays in my world now: asked again when a waiting update finally lands
+        // a different world: nothing known about the old one may be used in it (numbers, waiting updates, holds)
+        public static void ForgetWorld() { plantNumber.Clear(); forced.Clear(); waiting.Clear(); owner.Clear(); dirty.Clear(); lastSig.Clear(); ForgetEchoes(); }
+        static void ForgetEchoes() { takenFrom.Clear(); takenSig.Clear(); sentBase.Clear(); sentFirstSig.Clear(); }
+        public static void MarkSeenForTest(PlantRoot r) { string id = IdOf(r); lastSig[id] = Signature(r); dirty.Remove(id); }
+        public static void MarkDirtyForTest(string rootId) { dirty.Add(rootId); }
+
+        // (leader) my plant changed since I last looked at it or has growth not sent yet: a guest's copy cannot have that, whatever number it carries
+        static bool LeaderHasUnsent(string rootId)
+        {
+            if (dirty.Contains(rootId)) return true;
+            int seen;
+            if (!lastSig.TryGetValue(rootId, out seen)) return false;
+            foreach (PlantRoot pr in UnityEngine.Object.FindObjectsOfType(typeof(PlantRoot))) if (IdOf(pr) == rootId) return Signature(pr) != seen;
+            return false;
+        }
+
+        // (leader) the island counter follows the islands really connected in my world, never a number a guest says
+        static void RaiseIslandsToAttached()
+        {
+            if (!Singleton<PlayerAnalytics>.Exists) return;
+            int attached = 0;
+            foreach (NutrientProvider n in UnityEngine.Object.FindObjectsOfType(typeof(NutrientProvider))) if (n.m_attached) attached++;
+            var pa = Singleton<PlayerAnalytics>.Instance;
+            if (attached > pa.m_nutrientIslandsAttched && attached <= MaxIslands) { pa.m_nutrientIslandsAttched = attached; EnsureGrowingBeanstalk(); CoopBehaviour.Log("shared: a friend's island is connected in my world; island count is now " + attached); }
+        }
+        public static bool ForcedForTest(string rootId) { return forced.Contains(rootId); }
+        public static void ClearForcedForTest() { forced.Clear(); }
+        public static int PlantNumberForTest(string rootId) { int n; plantNumber.TryGetValue(rootId, out n); return n; }
         const float MinResend = 3f;          // while a plant keeps growing, send at most this often (the data is big)
         const float NearPlant = 4f;          // my walkster this close to a part of a plant counts as standing on it: updates to that plant wait
         const float OwnerHold = 8f;          // a plant stays owned this long after the owner's last update
@@ -50,10 +100,10 @@ namespace CoopMod
         public static bool QuietRejects;                      // set by the fuzz test, which sends hundreds of bad messages on purpose: keeps the log readable
         public static bool TestFailInPlaceOnce;               // fault injection: the next in-place plant update fails, so the rebuild path is exercised
 
-        public static bool IsMessage(byte[] m) { return m != null && m.Length > 0 && (m[0] == MsgPlant || m[0] == MsgShard || m[0] == MsgIsland || m[0] == MsgTeleporter); }
+        public static bool IsMessage(byte[] m) { return m != null && m.Length > 0 && (m[0] == MsgPlant || m[0] == MsgPlant2 || m[0] == MsgShard || m[0] == MsgIsland || m[0] == MsgTeleporter); }
 
         // After the whole world was replaced (join): forget what I knew and give things a few seconds to settle.
-        public static void Rebaseline() { quietUntil = Time.time + 6f; teleKnown.Clear(); teleSeen = false; lastSig.Clear(); dirty.Clear(); owner.Clear(); lastIslandCount = -1; attachedIds.Clear(); }
+        public static void Rebaseline() { quietUntil = Time.time + 6f; teleKnown.Clear(); teleSeen = false; lastSig.Clear(); dirty.Clear(); owner.Clear(); lastIslandCount = -1; attachedIds.Clear(); plantNumber.Clear(); forced.Clear(); waiting.Clear(); ForgetEchoes(); }
 
         static bool InitReflection()
         {
@@ -371,9 +421,12 @@ namespace CoopMod
         static void ApplyPlant(byte[] msg, ulong from)
         {
             if (!WorldSync.InWorld() || !InitReflection()) return;
-            var r = new BinaryReader(new MemoryStream(msg)); r.ReadByte();
+            var r = new BinaryReader(new MemoryStream(msg)); byte kind = r.ReadByte();
             string rootId = r.ReadString();
             ulong sender = SenderOf(from, r.ReadUInt64());
+            int number = kind == MsgPlant2 ? r.ReadInt32() : -1;
+            ulong echoOf = kind == MsgPlant2 ? r.ReadUInt64() : 0UL;
+            int echoNumber = kind == MsgPlant2 ? r.ReadInt32() : -1;
             int rawLen = r.ReadInt32(); int compLen = r.ReadInt32(); uint sum = r.ReadUInt32();
             if (compLen < 0 || compLen > msg.Length) throw new FormatException("bad packed size");
             byte[] data = Decompress(r.ReadBytes(compLen), rawLen);
@@ -381,6 +434,35 @@ namespace CoopMod
             if (Lz.Checksum(data) != sum) throw new FormatException("the update is damaged (checksum)");
             if (!HasPlant(rootId)) throw new FormatException("a plant I do not have");
             Parse(data);                              // a damaged update is thrown out here: the fallback below would otherwise destroy my plant for nothing
+
+            if (from != 0 && IAmGuest && from != LeaderId) return;      // a guest takes plants only from the leader (who passes on every change that counts)
+            if (from != 0 && IAmGuest && echoOf != 0 && echoOf == MyId)
+            {
+                int myBase;
+                if (plantNumber.TryGetValue(rootId, out myBase) ? myBase == echoNumber : echoNumber == 0)
+                {
+                    // the leader took my plant and passes it on as it was: I have that already (and maybe more). Build on its number; nothing is put back.
+                    StatEchoes++;
+                    plantNumber[rootId] = number; waiting.Remove(rootId);
+                    int firstSig; bool grewSince = !sentFirstSig.TryGetValue(rootId, out firstSig) || CurrentSignature(rootId) != firstSig;
+                    if (grewSince) dirty.Add(rootId);        // what I grew after that first send goes to the leader on the new number
+                    sentBase.Remove(rootId); sentFirstSig.Remove(rootId);
+                    return;
+                }
+            }
+            if (from != 0 && IAmLeader)
+            {
+                if (MayTakeFrom != null && !MayTakeFrom(from)) return;     // not (or no longer) in my world
+                int mine; plantNumber.TryGetValue(rootId, out mine);
+                if (number != mine || LeaderHasUnsent(rootId))
+                {
+                    // built on an older copy of my plant: taking it would undo my newer growth. They get mine instead.
+                    StatStale++;
+                    if (Time.realtimeSinceStartup - lastStaleLog > 10f) { lastStaleLog = Time.realtimeSinceStartup; CoopBehaviour.Log("shared: a friend's plant was built on an older copy of mine (" + number + ", mine is " + mine + "); not taken, sending them mine"); }
+                    ForceSend(rootId);
+                    return;
+                }
+            }
 
             owner[rootId] = new KeyValuePair<ulong, float>(sender, Time.time + OwnerHold);   // they are growing it: I only receive until they are done
             if (OnPlant(rootId)) { waiting[rootId] = new KeyValuePair<ulong, byte[]>(from, msg); if (!QuietRejects) CoopBehaviour.Log("shared: a friend plant update waits until I step off that plant"); return; }   // the owner is already set above, so my copy stays quiet meanwhile
@@ -401,6 +483,7 @@ namespace CoopMod
                         try { RemovePlantCopy(rootId); LoadUpdate(mine); if (!QuietRejects) CoopBehaviour.Log("shared: put my own plant back"); }
                         catch (Exception e3) { CoopBehaviour.Log("shared: could not put my own plant back: " + Short(e3)); }
                     }
+                    if (from != 0 && IAmGuest && from == LeaderId) { WorldSync.LoadedEpoch = 0; CoopBehaviour.Log("shared: the leader's plant could not be applied here; copying their whole world again"); }
                     return;
                 }
             }
@@ -412,6 +495,20 @@ namespace CoopMod
                 string id = IdOf(pr);
                 if (id != null && id == rootId) { lastSig[id] = Signature(pr); dirty.Remove(id); lastSent[id] = Time.time; }
             }
+            if (from != 0 && IAmGuest && number >= 0) plantNumber[rootId] = number;   // what I build on from now
+            if (from != 0 && IAmLeader)
+            {
+                // what I took goes to everybody, with a new number; another guest's copy built on the old one is now out of date
+                plantNumber[rootId] = number + 1;
+                int took; takenFrom[rootId] = new KeyValuePair<ulong, int>(from, number); takenSig[rootId] = lastSig.TryGetValue(rootId, out took) ? took : 0;
+                lastSent.Remove(rootId); ForceSend(rootId); RaiseIslandsToAttached();
+            }
+        }
+
+        static int CurrentSignature(string rootId)
+        {
+            foreach (PlantRoot pr in UnityEngine.Object.FindObjectsOfType(typeof(PlantRoot))) if (IdOf(pr) == rootId) return Signature(pr);
+            return 0;
         }
 
         // ---- teleporters -------------------------------------------------------------------------------------------------------------
@@ -516,6 +613,12 @@ namespace CoopMod
             var pa = Singleton<PlayerAnalytics>.Instance;
             // the next growth stage depends on this number, so a damaged or hostile value must not move it: the game has a few dozen islands at most
             if (counter < 0 || counter > MaxIslands || counter > pa.m_nutrientIslandsAttched + 8) throw new FormatException("island count out of range: " + counter);
+            if (from != 0 && IAmLeader)
+            {
+                // the leader's save counts only islands connected in the leader's world: they come with the guest's plant, once it is taken
+                RaiseIslandsToAttached();
+                return;
+            }
             if (counter > pa.m_nutrientIslandsAttched) pa.m_nutrientIslandsAttched = counter;
             lastIslandCount = pa.m_nutrientIslandsAttched;                                      // it is not my connection: never send it back
             EnsureGrowingBeanstalk();
@@ -578,10 +681,25 @@ namespace CoopMod
         }
 
         public static void TestApply(byte[] msg) { ApplyPlant(msg, 0UL); }
+        public static void TestApplyFrom(byte[] msg, ulong from) { ApplyPlant(msg, from); }
+
+        // A numbered plant message, as a guest that built on the leader's plant number `number` would send it.
+        public static byte[] TestNumberedMessage(PlantRoot r, ulong sender, byte[] raw, int number) { return TestNumberedMessage(r, sender, raw, number, 0UL, -1); }
+        public static byte[] TestNumberedMessage(PlantRoot r, ulong sender, byte[] raw, int number, ulong echoOf, int echoNumber)
+        {
+            byte[] comp = Compress(raw);
+            var ms = new MemoryStream(); var w = new BinaryWriter(ms);
+            w.Write(MsgPlant2); w.Write(IdOf(r)); w.Write(sender); w.Write(number); w.Write(echoOf); w.Write(echoNumber); w.Write(raw.Length); w.Write(comp.Length); w.Write(Lz.Checksum(raw)); w.Write(comp); WriteKeep(w, r);
+            return ms.ToArray();
+        }
+        public static void SetPlantNumberForTest(string rootId, int n) { plantNumber[rootId] = n; }
         public static void TestRevert(string rootId, byte[] raw) { InitReflection(); RemovePlantCopy(rootId); LoadUpdate(raw); }
         public static void TestApplyWaiting() { ApplyWaiting(); }
         public static int TestWaiting { get { return waiting.Count; } }
         public static void TestForget(string rootId) { owner.Remove(rootId); lastSig.Remove(rootId); lastSent.Remove(rootId); lastBytes.Remove(rootId); dirty.Remove(rootId); }
+
+        // a guest not yet in the leader's world: whatever it noticed in its own world is thrown away, never sent
+        public static void Hold() { outbox.Clear(); lastSig.Clear(); dirty.Clear(); forced.Clear(); }
 
         public static void Tick(ITransport broadcast)
         {
@@ -606,26 +724,47 @@ namespace CoopMod
                 string id = IdOf(root);
                 if (id == null) continue;
                 int sig = Signature(root);
-                int old;
-                if (!lastSig.TryGetValue(id, out old)) { lastSig[id] = sig; continue; }   // first look: just remember
-                bool changedThisTick = sig != old;
-                if (changedThisTick)
-                {
-                    lastSig[id] = sig;
-                    if (!settling && !OwnedByOther(id)) dirty.Add(id);                       // someone else is growing it: my copy changes only because I got their update
-                }
-                if (!dirty.Contains(id)) continue;
+                bool changedThisTick = false;
                 float since; if (!lastSent.TryGetValue(id, out since)) since = -99f;
-                // while it keeps changing send at most every ResendInterval (3-30 s by size); once it has been still for a tick, send the final state,
-                // but never sooner than MinResend after the last one (a plant that grows in short bursts would otherwise send every second)
-                int lastSize; lastBytes.TryGetValue(id, out lastSize);
-                if (Time.time - since < (changedThisTick ? ResendInterval(lastSize) : MinResend)) continue;
+                bool forceNow = IAmLeader && forced.Contains(id) && Time.time - since >= 2f;    // the leader passes on a plant it took (or answers an outdated one)
+                if (forceNow) { forced.Remove(id); lastSig[id] = sig; }
+                else
+                {
+                    if (IAmGuest && waiting.ContainsKey(id)) continue;       // the leader's newer plant waits for me to step off: build nothing on my older copy
+                    int old;
+                    if (!lastSig.TryGetValue(id, out old)) { lastSig[id] = sig; continue; }   // first look: just remember
+                    changedThisTick = sig != old;
+                    if (changedThisTick)
+                    {
+                        lastSig[id] = sig;
+                        // someone else is growing it: my copy changes only because I got their update. The leader's own growth always counts (and makes guests' copies old).
+                        if (IAmLeader && !settling) { dirty.Add(id); int n; plantNumber.TryGetValue(id, out n); plantNumber[id] = n + 1; }
+                        else if (!settling && !OwnedByOther(id)) dirty.Add(id);
+                    }
+                    if (!dirty.Contains(id)) continue;
+                    // while it keeps changing send at most every ResendInterval (3-30 s by size); once it has been still for a tick, send the final state,
+                    // but never sooner than MinResend after the last one (a plant that grows in short bursts would otherwise send every second)
+                    int lastSize; lastBytes.TryGetValue(id, out lastSize);
+                    if (Time.time - since < (changedThisTick ? ResendInterval(lastSize) : MinResend)) continue;
+                }
                 try
                 {
                     byte[] raw = Serialize(GroupFor(root));
                     byte[] comp = Compress(raw);
+                    int number; plantNumber.TryGetValue(id, out number);
+                    if (IAmLeader) { number++; plantNumber[id] = number; }
                     var ms = new MemoryStream(); var w = new BinaryWriter(ms);
-                    w.Write(MsgPlant); w.Write(id); w.Write(MyId); w.Write(raw.Length); w.Write(comp.Length); w.Write(Lz.Checksum(raw)); w.Write(comp); WriteKeep(w, root);
+                    if (LeaderId != 0)
+                    {
+                        // in a party: numbered (the leader's is the real one). A guest plant I pass on unchanged says whose it is, so that guest does not put its own growth back.
+                        KeyValuePair<ulong, int> tf; int ts; ulong echoOf = 0UL; int echoNumber = -1;
+                        if (IAmLeader && takenFrom.TryGetValue(id, out tf) && takenSig.TryGetValue(id, out ts) && ts == sig) { echoOf = tf.Key; echoNumber = tf.Value; }
+                        if (IAmLeader) { takenFrom.Remove(id); takenSig.Remove(id); }
+                        if (IAmGuest) { int b; if (!sentBase.TryGetValue(id, out b) || b != number) { sentBase[id] = number; sentFirstSig[id] = sig; } }
+                        w.Write(MsgPlant2); w.Write(id); w.Write(MyId); w.Write(number); w.Write(echoOf); w.Write(echoNumber);
+                    }
+                    else { w.Write(MsgPlant); w.Write(id); w.Write(MyId); }                                // no party: as before, everybody equal
+                    w.Write(raw.Length); w.Write(comp.Length); w.Write(Lz.Checksum(raw)); w.Write(comp); WriteKeep(w, root);
                     broadcast.SendReliable(ms.ToArray());
                     lastSent[id] = Time.time;
                     lastBytes[id] = comp.Length;
@@ -648,7 +787,7 @@ namespace CoopMod
             try
             {
                 if (msg[0] == MsgShard) ApplyShard(msg);
-                else if (msg[0] == MsgPlant) ApplyPlant(msg, from);
+                else if (msg[0] == MsgPlant || msg[0] == MsgPlant2) ApplyPlant(msg, from);
                 else if (msg[0] == MsgIsland) ApplyIsland(msg, from);
                 else if (msg[0] == MsgTeleporter) ApplyTeleporter(msg);
             }

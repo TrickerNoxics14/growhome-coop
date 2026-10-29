@@ -18,8 +18,13 @@ namespace CoopMod
         public uint LastRecvSeq;
         public float LastPacketTime = -999f, ConnectedAt = -999f;
         public bool AutoPulled;
+        public float LastPullAt = -999f;
         public bool Connected { get { return Time.realtimeSinceStartup - LastPacketTime < 2f; } }   // real time: game time stands still on the start screen
         public float LastStateTime = -999f;   // last position packet (the gap figures in the log), apart from pings
+        public int HasMyWorld;                // (I lead) the number of my world this player says they play in: their changes count while it is my world now
+        public int ToldHaveWorld;             // (I am a guest, this is the leader) the number of their world I told them I play in
+        public float NextEpochSend;
+        public float LastRefusedLog = -999f;
 
         public int RemoteSkin = -1, LastAppliedSkin = -1, AppliedForLocalSkin = -1;
         public float NextSkinCheck, LastSkinApply, NextSkinDiag;

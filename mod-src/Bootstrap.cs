@@ -199,6 +199,7 @@ namespace CoopMod
             PartyTick();
             if (Online && !chatOpen && !joinOpen && !hostMenuOpen && Input.GetKeyDown(KeyCode.T) && WorldSync.InWorld()) OpenChat();
             if (!Online && Time.realtimeSinceStartup >= nextSteamTry) TryStartSteam();
+            WorldSync.Transitions();
             if (Online) NetTick();
             SettingsTick();
             NativeUI.Tick();
@@ -253,14 +254,16 @@ namespace CoopMod
         // A guest copies the host's world once, a few seconds after the link comes up and the guest is in the world.
         void AutoPull()
         {
+            // whenever I play but not in the world the leader plays now (just came in, the leader moved on, my copy is an old one): copy theirs
             var host = HostPeer();
-            if (host != null && host.AutoPulled && WorldSync.SkipAutoPull && WorldSync.InWorld()) WorldSync.SkipAutoPull = false;   // nothing left to skip
-            if (host == null || host.AutoPulled || !host.Connected || Time.realtimeSinceStartup - host.ConnectedAt < 3f) return;
-            if (!WorldSync.InWorld()) return;
-            if (WorldSync.SkipAutoPullNow()) { WorldSync.SkipAutoPull = false; host.AutoPulled = true; Log("auto: the leader's world was loaded at the start, no second pull"); return; }
-            host.AutoPulled = true;
-            Log("auto: " + host.Label + " is the host, joining their world as a guest");
+            if (host == null || !host.Connected || Time.realtimeSinceStartup - host.ConnectedAt < 3f) return;
+            if (!WorldSync.InWorld() || WorldSync.LeaderEpoch == 0) return;                         // the leader has not said which world it plays yet
+            if (WorldSync.HostWorldLoaded || WorldSync.Receiving || WorldSync.RequestOutstanding) return;
+            if (Time.realtimeSinceStartup - host.LastPullAt < 20f) return;
+            host.LastPullAt = Time.realtimeSinceStartup; host.AutoPulled = true;
+            Log("auto: " + host.Label + " is the host and I am not in their world, copying it");
             WorldSync.EnterGuestMode();
+            if (!WorldSync.GuestPathsActive()) return;
             WorldSync.Request(host.Link);
         }
 
@@ -496,8 +499,10 @@ namespace CoopMod
 
         public void DropGhostForTest(Peer p) { DropGhost(p); }
 
+        float netTickStart;
         void NetTick()
         {
+            netTickStart = Time.realtimeSinceStartup;
             hub.Pump();
             if (Time.realtimeSinceStartup >= nextNames) { nextNames = Time.realtimeSinceStartup + 5f; RefreshNames(); }
             if (lanHub != null) lanHub.Pump();
@@ -529,7 +534,28 @@ namespace CoopMod
                     {
                         case Route.Visibility: ReceiveVisibility(p, rel); break;
                         case Route.Chat: HandleChat(p.Id, p.Label, rel); break;
-                        case Route.Shared: SharedWorld.Handle(rel, p.Id); break;
+                        case Route.Shared:
+                            if (!p.IsBot && !Authority.MayApply(RoomUsed, IAmHost, InMyWorld(p)))
+                            {
+                                // only my save is real: a player not yet in my world must not change it
+                                if (Time.realtimeSinceStartup - p.LastRefusedLog > 10f) { p.LastRefusedLog = Time.realtimeSinceStartup; Log("ignored world changes from " + p.Label + " (they are not in my world yet)"); }
+                                break;
+                            }
+                            SharedWorld.Handle(rel, p.Id); break;
+                        case Route.HaveWorld:
+                            {
+                                int e = BitConverter.ToInt32(rel, 1);
+                                if (IAmHost && e == WorldSync.MyEpoch && p.HasMyWorld != e) { p.HasMyWorld = e; Log(p.Label + " plays in my world now; their changes count"); }
+                                else if (IAmHost && e != WorldSync.MyEpoch) Log(p.Label + " plays in an older copy of my world; their changes do not count until they have the new one");
+                            }
+                            break;
+                        case Route.Epoch:
+                            {
+                                int e = BitConverter.ToInt32(rel, 1);
+                                if (WorldSync.LeaderEpoch != e) { WorldSync.LeaderEpoch = e; Log(p.Label + " plays world " + e + (WorldSync.LoadedEpoch == e ? " (the one I have)" : (WorldSync.InWorld() && WorldSync.GuestMode ? "; mine is another one, copying theirs" : ""))); }
+                                p.ToldHaveWorld = 0;      // answered again below: a note the leader lost or forgot (it reconnected) is made good within 3 s
+                            }
+                            break;
                         case Route.Oversized: Log("ignored an oversized message from " + p.Label); break;
                         case Route.SnapshotNotFromHost: Log("ignored world data from " + p.Label + " (not the host)"); break;
                         case Route.World: if (WorldSync.IsSnapshot(rel)) WorldSync.EnterGuestMode(); WorldSync.Handle(p.Link, rel); break;
@@ -537,7 +563,32 @@ namespace CoopMod
                 }
             }
             Perf.Begin(); AutoSync.Tick(broadcast, AnyConnected); Perf.End("AutoSync.Tick");
-            Perf.Begin(); SharedWorld.Tick(broadcast); Perf.End("SharedWorld.Tick");
+            Perf.Begin();
+            ulong leaderId = HostIdNow();
+            bool amGuest = leaderId != 0 && leaderId != myId;
+            SharedWorld.LeaderId = leaderId;
+            if (SharedWorld.MayTakeFrom == null) SharedWorld.MayTakeFrom = id => { foreach (var q in peers) if (q.Id == id) return q.IsBot || Authority.MayApply(RoomUsed, IAmHost, InMyWorld(q)); return false; };
+            if (Authority.MayShare(amGuest, WorldSync.HostWorldLoaded)) SharedWorld.Tick(broadcast); else SharedWorld.Hold();
+            if (amGuest && WorldSync.HostWorldLoaded && WorldSync.InWorld())
+            {
+                var leader = HostPeer();
+                if (leader != null && leader.Connected && leader.ToldHaveWorld != WorldSync.LoadedEpoch)
+                {
+                    leader.ToldHaveWorld = WorldSync.LoadedEpoch;
+                    var note = new byte[5]; note[0] = Authority.MsgHaveWorld; Buffer.BlockCopy(BitConverter.GetBytes(WorldSync.LoadedEpoch), 0, note, 1, 4);
+                    leader.Link.SendReliable(note); Log("told " + leader.Label + " I play in their world");
+                }
+            }
+            // the host says which world it plays, now and then and to every new player (also without a party: a guest needs it to count as in the host's world)
+            if (IAmHost)
+                foreach (var p in peers)
+                {
+                    if (p.IsBot || !p.Connected || Time.realtimeSinceStartup < p.NextEpochSend) continue;
+                    p.NextEpochSend = Time.realtimeSinceStartup + 3f;
+                    var m = new byte[5]; m[0] = Authority.MsgEpoch; Buffer.BlockCopy(BitConverter.GetBytes(WorldSync.MyEpoch), 0, m, 1, 4);
+                    p.Link.SendReliable(m);
+                }
+            Perf.End("SharedWorld.Tick");
             Perf.Begin(); AutoPull(); Perf.End("AutoPull");
 
             Perf.Begin();
@@ -608,6 +659,9 @@ namespace CoopMod
                 p.LastStateTime = Time.realtimeSinceStartup;
                 Heard(p);
                 if (root == null) continue;
+                // only my save is real: a player who is not in my world yet neither moves things in it nor stands in it
+                bool inMine = p.IsBot || Authority.MayApply(RoomUsed, IAmHost, InMyWorld(p));
+                if (!inMine) { ObjectSync.SetRemoteHeld(p.Id, new PlayerState.Held[0]); continue; }
                 if (p.Clone == null)
                 {
                     SpawnClone(p, s.pos + p.SelfOffset);
@@ -1135,7 +1189,7 @@ namespace CoopMod
         List<Party.Friend> friendsCache = new List<Party.Friend>();
         readonly HashSet<ulong> roomPeers = new HashSet<ulong>();      // players I am connected to because of the party (dropped when I leave it)
         readonly HashSet<ulong> invitedFriends = new HashSet<ulong>();
-        public const float PreloadWait = 20f;
+        public const float PreloadWait = 120f;   // a big world through Steam's relay can take a while; the menu shows it is coming
 
         bool AtStartScreen { get { return Singleton<StartScreen>.Exists && !WorldSync.InGameOrLoading(); } }
 
@@ -1143,7 +1197,11 @@ namespace CoopMod
         bool StartScreenIdle { get { return AtStartScreen && !FadeScreen.FadeInProgress && (CoopMenu.StartMenuShowing() || CoopMenu.PartyMenuShowing()); } }
 
         public void MenuOpened() { menuPage = ""; reopenParty = false; }
-        public bool BlockBack { get { return following || hostStarting; } }   // the party menu stays up while the game is starting (no start menu buttons racing it)
+        // the party menu stays up while the game is starting (no start menu buttons racing it), and for a member of a party on the start screen:
+        // everybody plays the leader's game, so a member gets the start menu (CONTINUE / NEW GAME of their own) only by leaving the party
+        public bool BlockBack { get { return following || hostStarting || MemberAtStart; } }
+        bool MemberAtStart { get { return AtStartScreen && lobby != null && lobby.InLobby && !lobby.IsOwner; } }
+        public void BackRefused() { if (MemberAtStart && !following) CoopUI.Toast("YOU PLAY IN THE LEADER'S GAME. LEAVE THE PARTY TO PLAY YOUR OWN"); }
         public bool MenuBack() { if (menuPage.Length == 0) return false; menuPage = ""; return true; }
         public void SetMenuPageForTest(string page) { menuPage = page ?? ""; }
         public bool FollowingForTest { get { return following; } }
@@ -1214,6 +1272,7 @@ namespace CoopMod
             if (lobby.InLobby && lobby.Id.m_SteamID == lobbyId) return;
             if (lobby.InLobby) LeaveParty(false);
             lobby.ClearInvite();
+            WorldSync.LeaderEpoch = 0; WorldSync.LoadedEpoch = 0;
             lobby.Join(lobbyId);
             Log("party: joining party " + lobbyId);
             if (AtStartScreen && !CoopMenu.PartyMenuShowing()) reopenParty = true;
@@ -1237,6 +1296,7 @@ namespace CoopMod
             pending.Clear(); invitedFriends.Clear(); myReady = false; seenPlay = null; codeSaved = false; menuPage = ""; waitToasted = false;
             foreach (ulong id in new List<ulong>(roomPeers)) RemovePeer(id);
             roomPeers.Clear();
+            WorldSync.LeaderEpoch = 0; WorldSync.LoadedEpoch = 0;     // that party's world counts for nothing any more
             if (!WorldSync.StartingNow()) { following = false; hostStarting = false; }   // a follow already handed to the game's own start finishes; anything else ends here
             WorldSync.SkipAutoPull = false;
             if (AtStartScreen && !following) WorldSync.LeaveGuestMode();
@@ -1247,12 +1307,21 @@ namespace CoopMod
         {
             if (Time.realtimeSinceStartup - p.LastPacketTime > 10f)
             {
-                p.ConnectedAt = Time.realtimeSinceStartup; p.AutoPulled = false;
+                p.ConnectedAt = Time.realtimeSinceStartup; p.AutoPulled = false; p.HasMyWorld = 0; p.ToldHaveWorld = 0; p.NextEpochSend = 0f;
+                // the leader was gone for a while: what I have may have missed their changes, so their world is copied again before mine counts
+                ulong lead = HostIdNow();
+                // (a long frame here, a world load say, is no gap: the leader's packets only waited for me)
+                bool realGap = netTickStart - p.LastPacketTime > 10f && Time.unscaledDeltaTime < 3f;
+                if (realGap && p.Id == lead && lead != myId && WorldSync.LoadedEpoch != 0 && WorldSync.InWorld()) { WorldSync.LoadedEpoch = 0; Log("the leader is back after a gap; copying their world again"); }
+                if (IAmHost && !WorldSync.GuestMode && !p.IsBot) WorldSync.BackupOwnWorld(p.Label + " connected", false);
                 Log(p.Label + " connected"); if (!p.IsBot) CoopUI.Toast("SIGNAL ACQUIRED: " + p.Label + " ONLINE");
             }
             p.WasConnected = true;
             p.LastPacketTime = Time.realtimeSinceStartup;
         }
+
+        // (I lead) this player plays in the world I play now
+        bool InMyWorld(Peer p) { return p.HasMyWorld != 0 && p.HasMyWorld == WorldSync.MyEpoch; }
 
         void RemovePeer(ulong id)
         {
@@ -1280,8 +1349,10 @@ namespace CoopMod
             if (WorldSync.GuestMode) { CoopUI.Toast("YOUR OWN SAVE IS NOT BACK YET, TRY AGAIN"); return; }
             if (!CoopMenu.PartyMenuShowing()) CoopMenu.OpenFromStart(false);
             hostStarting = true;
+            WorldSync.BackupOwnWorld("party start", true);
             AnnouncePlay(true);
             bool fresh = !SaveSystem.LevelSaveExists(Application.loadedLevelName);
+            if (fresh) WorldSync.NewLeaderWorld("new game");
             Log("party: I start the game (" + (fresh ? "new game" : "continue") + "); " + (lobby.Members().Count - 1) + " other players follow");
             StartScreen.StartGameCountdown(fresh);
         }
@@ -1329,17 +1400,25 @@ namespace CoopMod
             {
                 if (!following || lobby == null || !lobby.InLobby || !AtStartScreen) { WorldSync.EndPreload(); following = false; yield break; }   // left the party, or the game started some other way
                 var host = HostPeer();
-                if (host != null && Time.realtimeSinceStartup - askedAt > 15f) { askedAt = Time.realtimeSinceStartup; WorldSync.Request(host.Link); }   // a world takes a while to arrive; ask again only rarely
+                if (host != null && !WorldSync.Receiving && Time.realtimeSinceStartup - askedAt > 15f) { askedAt = Time.realtimeSinceStartup; WorldSync.Request(host.Link); }   // a world takes a while to arrive; ask again only rarely, never while it is coming in
                 yield return null;
             }
             bool got = WorldSync.Preloaded;
             WorldSync.EndPreload();
-            Log("party: " + (got ? "the leader's world arrived, starting" : "no world from the leader after " + PreloadWait + " s, starting anyway (it is copied once I am in)"));
+            if (!got)
+            {
+                // never into a world of my own: everybody plays in the leader's save, so without it there is no game to join
+                following = false;
+                Log("party: no world from the leader after " + PreloadWait + " s; not starting (JOIN THE GAME tries again)");
+                CoopUI.Toast("COULD NOT GET THE LEADER'S WORLD. PRESS JOIN THE GAME TO TRY AGAIN");
+                yield break;
+            }
+            Log("party: the leader's world arrived, starting");
             // only from the party menu, with nothing else starting the game: otherwise two countdowns would fight
             float t1 = Time.realtimeSinceStartup;
             while (following && AtStartScreen && !(CoopMenu.PartyMenuShowing() && !FadeScreen.FadeInProgress) && Time.realtimeSinceStartup - t1 < 5f) yield return null;
             if (!following || !AtStartScreen || !CoopMenu.PartyMenuShowing() || FadeScreen.FadeInProgress) { following = false; Log("party: the game was not started from the party menu, follow cancelled"); yield break; }
-            WorldSync.SkipAutoPull = got;
+            WorldSync.SkipAutoPull = true;
             WorldSync.BeginStart();
             StartScreen.StartGameCountdown(false);
         }
@@ -1353,6 +1432,7 @@ namespace CoopMod
             wasInLobby = lobby.InLobby;
             if (inWorld || !Singleton<StartScreen>.Exists) { following = false; hostStarting = false; }
             if (connectAtStart != 0 && Singleton<StartScreen>.Exists) { ulong l = connectAtStart; connectAtStart = 0; JoinParty(l); }
+            if (MemberAtStart && !joinOpen && !following && CoopMenu.StartMenuShowing()) reopenParty = true;   // a member's start menu is covered by the party menu
             if (reopenParty && !joinOpen && !following)
             {
                 if (!atStart) reopenParty = false;

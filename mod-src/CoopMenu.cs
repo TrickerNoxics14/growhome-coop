@@ -318,7 +318,7 @@ namespace CoopMod
 
         void Back()
         {
-            if (Mod != null && Mod.BlockBack) return;
+            if (Mod != null && Mod.BlockBack) { Mod.BackRefused(); return; }
             if (Mod != null && Mod.MenuBack()) { Refresh(false); return; }   // a page inside the menu (friends) goes back to the main page first
             if (Menu != null) Menu.Close();
         }

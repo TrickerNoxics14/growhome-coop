@@ -1,7 +1,7 @@
 ﻿{
-    "version":  12,
+    "version":  13,
     "dll":  "https://raw.githubusercontent.com/TrickerNoxics14/growhome-coop/main/CoopMod.dll",
-    "sha256":  "7a8a6d0872c6fa0e7c436843cc10d05f54cf23ab7b9b34812f1c040e77679aec",
-    "notes":  "Adds a party system on the start screen: host a friends or public party, invite Steam friends, see who is ready, and members follow the leader into their world automatically (their own save stays safe).",
-    "signature":  "YBsCZYknCAhqYF0RjRgzQbrUH9j2r6IWB3a7F0kZncBqqQJ7N3Bz/iP7GBmQ7QUiJCrjQJfuI9J6FI2O6skbp44byWu+bkvIcq3SayWaFbj7W2eiGBohS7/UBbUJoinlNRSiEeyqe+VuP/9yJe7rQaBWUxJxr1krGA1gAKkDQPnBCe8boukaQtnQJfbVCm/zISH/Q1pH6WKsHp0EXlxKhi4hpLrJ9pbW6wAP6CUMmHQyEqxrv+Jivo1UEYIcQNYfowFnxa9VGWPxkOSQfyvaU47iyR9EpSm3wCahdf8+JRnvf4fb7U4tq7PS5+fY3tRN/CojAQE9HoQkjJKgge2qv/fik00xdbAHsMwaD+Y5/R+EThhpx+Zkpmv57yvAWRYfmG//+GsKBLoasSLZ9VkSsYjC3WbOMyTFhfj9CiuLqoECZ0HS/AUocaGBwM1VPOy3QBvksnTCaScQInVroRq0TeKzgc97I5VP/cojtIDcMLJyjylahSkTrS62RCz6X4EE"
+    "sha256":  "d7c3b3488c013d5c8a07c299b4d7a3b372869ee49057519220496dc4bd0e0423",
+    "notes":  "Everyone in a party now plays in the leader\u0027s save: guests always load the leader\u0027s world, can never overwrite it, and the leader\u0027s save is backed up automatically.",
+    "signature":  "FR8cOmfItadGWoFcVw1Ri2nl8DlEkFIna0evRUEzDpq/omW0FbXmyonyg5o3CG7M+NeUSHe4akgQzCbRUODbxJTEazIkVIyRKSfhZyCsa3H7zmLyy2eXIwyRa+5npcrIaSY61rrW8jICC8vtEvD+r6O8jfnUt3WdrAaFrw7Lw1DhJbLIz/Fa0ztH86UIw8Tz9kyVm7pO4Wk32Rt7nFYLOSvDdiIUw58C/BMOA/Sspa7oDAkI4zFeu3l2ZM5mywNvKyXTGauwxXRs121pX+xJn8bTMtixG39JCxO0Og8Ah/3Fe71b1QNp4DOkDG5SrBOibe0dMa/K5QiMSxBtpoVrHzg3qDFIWZdkhemfFVbLiYBc0hs+Eh5zxbixbjnDIMzKyhXeV9d440CQz/kzv/A3u+AuhU1gJW0cjHlOhMfwQle0K8DBA4x3LIR7mRKycVmf9wpAjr5UCtH0aTg+nkCShBbZOzZSX28lwUuckX8ibMCTwm4ix0rLyB4139hKQQv8"
 }

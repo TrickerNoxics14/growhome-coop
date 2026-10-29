@@ -601,6 +601,7 @@ namespace CoopMod
             try { CheckSecurity(); } catch (Exception e) { Check("AUDIT-ERROR", "security checks ran", false, Describe(e)); }
             try { CheckRooms(); } catch (Exception e) { Check("AUDIT-ERROR", "room checks ran", false, Describe(e)); }
             try { CheckParty(); } catch (Exception e) { Check("PARTY", "party checks ran", false, Describe(e)); }
+            try { CheckLeaderSave(); } catch (Exception e) { Check("WORLD-PARTS", "world part checks ran", false, Describe(e)); }
 
             float begin = Time.realtimeSinceStartup;
             bool pressed = false, partyTested = false; float menuAt = -1f;
@@ -658,6 +659,7 @@ namespace CoopMod
                 yield return StartCoroutine(TestPlant(r, r.IsTrunk() ? "trunk" : "plant " + others, quick ? 8 : (r.IsTrunk() ? 25 : 10), !faultTested));
                 tested++;
                 if (r != null && r.IsTrunk() && tested == 1) yield return StartCoroutine(TestIsland(r));
+                if (r != null && r.IsTrunk() && tested == 1) TestPlantLeader(r);
                 if (quick) break;
             }
             Check("PLANT-SEND", "at least one plant was tested", tested > 0, tested + " plants");
@@ -812,6 +814,65 @@ namespace CoopMod
             Try("PLANT-OWNER", label + ": local pull after hold", delegate { Stimulate(root); });
             yield return new WaitForSeconds(6f);
             Check("PLANT-OWNER", label + ": sends again after the friend is done", MessagesFor(id).Count > resumeBefore, (MessagesFor(id).Count - resumeBefore) + " messages");
+        }
+
+        // In a party the leader's plant is the real one: a guest's plant built on an older copy is not taken (it would undo the leader's growth),
+        // one built on the newest is taken and passed on with a new number, and a guest takes plants only from the leader.
+        void TestPlantLeader(PlantRoot trunk)
+        {
+            string id = SharedWorld.PlantId(trunk);
+            ulong me = SharedWorld.MyId, leader = 76561199000000777UL;
+            byte[] raw = null;
+            if (!Try("PLANT-LEADER", "read the trunk state", delegate { raw = SharedWorld.TestRaw(trunk); })) return;
+            SharedWorld.TestPlayerOnPlant = false;
+            var mayTake = SharedWorld.MayTakeFrom; SharedWorld.MayTakeFrom = null;     // the test's friend is not a connected player
+            try
+            {
+                // I lead: my trunk has number 5 (all messages go through Handle, as they come in from the network)
+                SharedWorld.LeaderId = me; SharedWorld.ClearForcedForTest(); SharedWorld.SetPlantNumberForTest(id, 5); SharedWorld.MarkSeenForTest(trunk);
+                int applied0 = SharedWorld.StatApplied, stale0 = SharedWorld.StatStale;
+                Try("PLANT-LEADER", "a guest's trunk built on copy 4", delegate { SharedWorld.Handle(SharedWorld.TestNumberedMessage(trunk, Friend, raw, 4), Friend); });
+                bool refused = SharedWorld.StatApplied == applied0 && SharedWorld.StatStale == stale0 + 1 && SharedWorld.ForcedForTest(id);
+                Try("PLANT-LEADER", "an unnumbered trunk from a guest", delegate { SharedWorld.Handle(SharedWorld.TestMessage(trunk, Friend, raw), Friend); });
+                bool unnumbered = SharedWorld.StatApplied == applied0;
+                Check("PLANT-LEADER", "the leader does not take a guest's plant built on an older copy of the leader's plant (it would remove the leader's newer growth) and sends the guest its own instead",
+                    refused && unnumbered, "applied " + (SharedWorld.StatApplied - applied0) + ", stale " + (SharedWorld.StatStale - stale0) + ", answers with mine " + SharedWorld.ForcedForTest(id));
+                SharedWorld.ClearForcedForTest();
+                Try("PLANT-LEADER", "a guest's trunk built on copy 5", delegate { SharedWorld.Handle(SharedWorld.TestNumberedMessage(trunk, Friend, raw, 5), Friend); });
+                Check("PLANT-LEADER", "the leader takes a guest's plant built on its newest copy and passes it on to everybody",
+                    SharedWorld.StatApplied == applied0 + 1 && SharedWorld.ForcedForTest(id), "applied " + (SharedWorld.StatApplied - applied0) + ", passed on " + SharedWorld.ForcedForTest(id));
+                int appliedTaken = SharedWorld.StatApplied;
+                Try("PLANT-LEADER", "a second guest's trunk also built on copy 5", delegate { SharedWorld.Handle(SharedWorld.TestNumberedMessage(trunk, Friend + 1, raw, 5), Friend + 1); });
+                Check("PLANT-LEADER", "once the leader took one guest's plant, another guest's copy built on the same old number is refused (it would remove the first guest's growth)",
+                    SharedWorld.StatApplied == appliedTaken && SharedWorld.PlantNumberForTest(id) == 6, "applied " + (SharedWorld.StatApplied - appliedTaken) + ", leader number " + SharedWorld.PlantNumberForTest(id));
+
+                // my trunk grew and that growth is not sent yet: a guest's copy cannot have it, even with my newest number
+                SharedWorld.ClearForcedForTest(); SharedWorld.SetPlantNumberForTest(id, 7); SharedWorld.MarkSeenForTest(trunk); SharedWorld.MarkDirtyForTest(id);
+                int applied2 = SharedWorld.StatApplied;
+                Try("PLANT-LEADER", "a guest's trunk built on copy 7 while my growth is unsent", delegate { SharedWorld.Handle(SharedWorld.TestNumberedMessage(trunk, Friend, raw, 7), Friend); });
+                Check("PLANT-LEADER", "the leader does not take a guest's plant while its own newer growth on that plant is not sent yet",
+                    SharedWorld.StatApplied == applied2 && SharedWorld.ForcedForTest(id), "applied " + (SharedWorld.StatApplied - applied2) + ", answers with mine " + SharedWorld.ForcedForTest(id));
+                SharedWorld.MarkSeenForTest(trunk);
+
+                // I am a guest of `leader`
+                SharedWorld.LeaderId = leader; SharedWorld.ClearForcedForTest(); SharedWorld.SetPlantNumberForTest(id, 0);
+                int applied1 = SharedWorld.StatApplied;
+                Try("PLANT-LEADER", "another guest's trunk", delegate { SharedWorld.Handle(SharedWorld.TestNumberedMessage(trunk, Friend, raw, 0), Friend); });
+                bool ignoredGuest = SharedWorld.StatApplied == applied1;
+                Try("PLANT-LEADER", "the leader's trunk number 9", delegate { SharedWorld.Handle(SharedWorld.TestNumberedMessage(trunk, leader, raw, 9), leader); });
+                Check("PLANT-LEADER", "a guest takes plants only from the leader and builds on the leader's number from then on",
+                    ignoredGuest && SharedWorld.StatApplied == applied1 + 1 && SharedWorld.PlantNumberForTest(id) == 9, "other guest ignored " + ignoredGuest + ", leader's taken " + (SharedWorld.StatApplied - applied1) + ", number " + SharedWorld.PlantNumberForTest(id));
+
+                // the leader passes on the plant it took from me: that is my own growth coming back, it must not put my newer growth back (or wait to)
+                SharedWorld.TestPlayerOnPlant = true;     // I am still on the plant, growing it
+                int applied3 = SharedWorld.StatApplied, echoes0 = SharedWorld.StatEchoes, waiting0 = SharedWorld.TestWaiting;
+                Try("PLANT-LEADER", "the leader passes on my trunk built on 9", delegate { SharedWorld.Handle(SharedWorld.TestNumberedMessage(trunk, leader, raw, 11, me, 9), leader); });
+                Check("PLANT-LEADER", "a guest whose plant the leader took and passed on keeps its own (newer) growth and builds on the leader's new number",
+                    SharedWorld.StatApplied == applied3 && SharedWorld.StatEchoes == echoes0 + 1 && SharedWorld.TestWaiting == waiting0 && SharedWorld.PlantNumberForTest(id) == 11,
+                    "applied " + (SharedWorld.StatApplied - applied3) + ", echoes " + (SharedWorld.StatEchoes - echoes0) + ", waiting " + (SharedWorld.TestWaiting - waiting0) + ", number " + SharedWorld.PlantNumberForTest(id));
+                SharedWorld.TestPlayerOnPlant = false;
+            }
+            finally { SharedWorld.MayTakeFrom = mayTake; SharedWorld.LeaderId = 0; SharedWorld.ClearForcedForTest(); SharedWorld.SetPlantNumberForTest(id, 0); SharedWorld.TestPlayerOnPlant = null; }
         }
 
         // Connecting a floating island: the attachment, the island counter (the "n/6" icon and growth stage) and the HUD must all follow.
@@ -1147,6 +1208,116 @@ namespace CoopMod
         }
 
         // The party rules and the party menu's lines for every state (pure).
+        class CaptureTransport : ITransport
+        {
+            public readonly List<byte[]> Sent = new List<byte[]>();
+            public int MaxSize;
+            public void Send(byte[] data) { }
+            public byte[] Receive() { return null; }
+            public void SendReliable(byte[] data) { Sent.Add(data); if (data.Length > MaxSize) MaxSize = data.Length; }
+            public byte[] ReceiveReliable() { return null; }
+            public string Diagnostics() { return "capture"; }
+            public void Close() { }
+        }
+
+        static bool Equal(byte[] a, byte[] b)
+        {
+            if (a == null || b == null || a.Length != b.Length) return false;
+            for (int i = 0; i < a.Length; i++) if (a[i] != b[i]) return false;
+            return true;
+        }
+
+        // A grown world is bigger than one Steam message: it goes as packed parts, and only the leader's world counts.
+        void CheckLeaderSave()
+        {
+            // a 1.8 MB world, half of it hard to pack, as big as a real grown one
+            var rnd = new System.Random(7);
+            var world = new byte[1800000];
+            for (int i = 0; i < world.Length; i++) world[i] = i < 900000 ? (byte)rnd.Next(256) : (byte)(i % 97);
+            var parts = WorldTransfer.Split(world, 42);
+            int largest = 0; foreach (var p in parts) largest = Math.Max(largest, p.Length);
+            byte[] back = null;
+            var asm = new WorldTransfer.Assembly();
+            for (int i = parts.Count - 1; i >= 0; i--) { var w = asm.Add(parts[i], 0f); if (w != null) back = w; }     // out of order
+            Check("WORLD-PARTS", "a world bigger than one Steam message (1.8 MB) goes in packed parts under 1 MB each and comes back exactly, in any order",
+                parts.Count > 1 && largest < 1000000 && Equal(back, world), "parts=" + parts.Count + " largest=" + largest + " back=" + (back != null));
+
+            var again = new WorldTransfer.Assembly(); byte[] twice = null;
+            again.Add(parts[0], 0f); again.Add(parts[0], 0f);
+            for (int i = 1; i < parts.Count; i++) { var w = again.Add(parts[i], 0f); if (w != null) twice = w; }
+            var newer = WorldTransfer.Split(world, 43);
+            var mixed = new WorldTransfer.Assembly(); byte[] fromNewer = null;
+            mixed.Add(parts[0], 0f);
+            foreach (var p in newer) { var w = mixed.Add(p, 0f); if (w != null) fromNewer = w; }
+            Check("WORLD-PARTS", "a part that comes twice counts once, and a newer sending of the world starts over cleanly", Equal(twice, world) && Equal(fromNewer, world), "");
+
+            int refused = 0, cases = 0;
+            var bad = new List<byte[]>();
+            var flipped = (byte[])parts[parts.Count - 1].Clone(); flipped[flipped.Length - 1] ^= 0x5A; bad.Add(flipped);       // damaged data
+            foreach (int field in new[] { 5, 7, 9, 17 })                                                                         // part number, part count, sizes
+                foreach (int v in new[] { -1, 0, 65535, int.MaxValue })
+                {
+                    if (field == 5 && v == 0) continue;   // that is the real number of the first part
+                    var m = (byte[])parts[0].Clone();
+                    if (field == 5 || field == 7) { var b2 = BitConverter.GetBytes((ushort)v); m[field] = b2[0]; m[field + 1] = b2[1]; }
+                    else { var b4 = BitConverter.GetBytes(v); Buffer.BlockCopy(b4, 0, m, field, 4); }
+                    bad.Add(m);
+                }
+            bad.Add(new byte[] { WorldTransfer.MsgPart, 1, 2 });
+            var cut = new byte[parts[0].Length - 100]; Buffer.BlockCopy(parts[0], 0, cut, 0, cut.Length); bad.Add(cut);
+            foreach (var m in bad)
+            {
+                cases++;
+                var a = new WorldTransfer.Assembly();
+                try
+                {
+                    byte[] w = null;
+                    if (m == flipped) { for (int i = 0; i < parts.Count - 1; i++) a.Add(parts[i], 0f); }
+                    w = a.Add(m, 0f);
+                    if (m != flipped && w == null && parts.Count > 1) { foreach (var p in parts) if (p != parts[0]) { var x = a.Add(p, 0f); if (x != null) w = x; } }
+                    if (w == null || !Equal(w, world)) refused++;
+                }
+                catch (Exception) { refused++; }
+            }
+            Check("WORLD-PARTS", "damaged parts are refused with an ordinary error: wrong numbers, absurd sizes, cut off, changed data (checksum)", refused == cases, refused + "/" + cases);
+
+            Check("WORLD-PARTS", "world parts are only taken from the leader, like a whole world",
+                MessageGate.Classify(parts[0], false) == Route.SnapshotNotFromHost && MessageGate.Classify(parts[0], true) == Route.World, "");
+
+            Check("LEADER-SAVE", "the leader of a party uses a player's world changes only once that player plays in the leader's world; without a party nothing changes",
+                !Authority.MayApply(true, true, false) && Authority.MayApply(true, true, true) && Authority.MayApply(false, true, false) && Authority.MayApply(true, false, false), "");
+            Check("LEADER-SAVE", "a guest sends none of its own world until it plays in the leader's world (its blank world never reaches the leader)",
+                !Authority.MayShare(true, false) && Authority.MayShare(true, true) && Authority.MayShare(false, false), "");
+            Check("LEADER-SAVE", "the I-am-in-your-world note (with the number of the leader's world) is understood and nothing else is taken for it",
+                MessageGate.Classify(new byte[] { Authority.MsgHaveWorld, 1, 2, 3, 4 }, false) == Route.HaveWorld && MessageGate.Classify(new byte[] { Authority.MsgHaveWorld }, false) == Route.Ignore, "");
+            Check("LEADER-SAVE", "only the leader can say which world it plays", MessageGate.Classify(new byte[] { Authority.MsgEpoch, 1, 2, 3, 4 }, true) == Route.Epoch && MessageGate.Classify(new byte[] { Authority.MsgEpoch, 1, 2, 3, 4 }, false) == Route.Ignore, "");
+            Check("LEADER-SAVE", "a guest is in the leader's world only while the world it loaded is the one the leader plays now (not an old copy, not another leader's, not none)",
+                Authority.InLeaderWorld(true, 5, 5) && !Authority.InLeaderWorld(true, 5, 6) && !Authority.InLeaderWorld(true, 0, 0) && !Authority.InLeaderWorld(false, 5, 5), "");
+            Check("LEADER-SAVE", "a member following the leader waits up to " + CoopBehaviour.PreloadWait + " s for a big world (the follow never starts a world of its own when it does not come)", CoopBehaviour.PreloadWait >= 60f, "wait=" + CoopBehaviour.PreloadWait);
+            var ep = WorldTransfer.Split(new byte[5000], 1, 777); var epa = new WorldTransfer.Assembly(); byte[] epw = null; foreach (var p in ep) { var w = epa.Add(p, 0f); if (w != null) epw = w; }
+            Check("WORLD-PARTS", "the number of the leader's world travels with it", epw != null && epa.Epoch == 777, "epoch=" + epa.Epoch);
+
+            // any message bigger than one Steam message goes in pieces and is whole again on the other side
+            var big = new byte[2500000]; for (int i = 0; i < big.Length; i++) big[i] = (byte)rnd.Next(256);
+            var pieces = PeerLink.Pieces(big);
+            var link = new PeerLink(null, 1UL);
+            byte[] whole = null; int biggest = 0;
+            if (pieces != null) for (int i = pieces.Count - 1; i >= 0; i--) { biggest = Math.Max(biggest, pieces[i].Length); var w = link.AddPiece(pieces[i]); if (w != null) whole = w; }
+            var small = PeerLink.Pieces(new byte[1000]);
+            Check("WORLD-PARTS", "a big plant or world message (2.5 MB) goes in pieces under 1 MB and comes back exactly; a small one goes as it is",
+                pieces != null && pieces.Count > 1 && biggest < 1000000 && Equal(whole, big) && small != null && small.Count == 1 && small[0].Length == 1000, "pieces=" + (pieces != null ? pieces.Count : -1) + " biggest=" + biggest);
+            var badLink = new PeerLink(null, 2UL); int badOk = 0;
+            if (pieces != null)
+            {
+                var p0 = (byte[])pieces[0].Clone(); p0[7] = 200; if (badLink.AddPiece(p0) == null) badOk++;
+                var p1 = (byte[])pieces[0].Clone(); Buffer.BlockCopy(BitConverter.GetBytes(int.MaxValue), 0, p1, 9, 4); if (badLink.AddPiece(p1) == null) badOk++;
+                var p2 = new byte[pieces[0].Length - 7]; Buffer.BlockCopy(pieces[0], 0, p2, 0, p2.Length); if (badLink.AddPiece(p2) == null) badOk++;
+            }
+            if (badLink.AddPiece(new byte[] { PeerLink.MsgPiece, 1 }) == null) badOk++;
+            Check("WORLD-PARTS", "pieces with wrong numbers, absurd sizes or cut off are dropped", badOk == 4, badOk + "/4");
+            Check("WORLD-PARTS", "a message too big even for pieces is not sent", PeerLink.Pieces(new byte[PeerLink.PieceSize * PeerLink.MaxPieces + 1]) == null, "");
+        }
+
         void CheckParty()
         {
             bool follow = Party.ShouldFollow(true, false, true, false, "3", null) && Party.ShouldFollow(true, false, true, false, "4", "3")
@@ -1374,6 +1545,26 @@ namespace CoopMod
             WorldSync.LeaveGuestMode();
             bool backAfter = !WorldSync.GuestMode && SaveSystem.m_playerSavePath == ownPlayer && SaveSystem.m_levelFilesPath == ownLevels;
             Check("PARTY-LEAVE", "while the game is starting for a member following the leader, nothing switches the saves back to my own (the leader's world is what loads)", kept && backAfter, "kept=" + kept + " backAfter=" + backAfter);
+
+            // the leader on the start screen answers a world request at once, with the save the game is about to load
+            string ownFile = Path.Combine(SaveSystem.m_levelFilesPath, Application.loadedLevelName + ".sav");
+            bool hasOwn = File.Exists(ownFile) && !WorldSync.GuestMode;
+            var cap = new CaptureTransport();
+            WorldSync.Handle(cap, new byte[] { 1 });
+            WorldSync.Forget(cap);     // never left waiting for an answer
+            byte[] answered = null; string why = "";
+            try { var asm = new WorldTransfer.Assembly(); foreach (var m in cap.Sent) { var w = asm.Add(m, 0f); if (w != null) answered = w; } }
+            catch (Exception e) { why = e.Message; }
+            bool sameFile = answered != null && hasOwn && Equal(answered, File.ReadAllBytes(ownFile));
+            Check("LEADER-SAVE", "the leader still on the start screen sends their saved world straight away (no waiting until they are in the game), in parts that each fit one Steam message, exactly the file the game loads",
+                hasOwn && sameFile && cap.Sent.Count > 0 && cap.MaxSize < 1000000, "own=" + hasOwn + " parts=" + cap.Sent.Count + " largest=" + cap.MaxSize + " same=" + sameFile + " " + why);
+
+            // a copy of the leader's world is kept before a party plays in it
+            string testBackups = Path.Combine(Path.GetTempPath(), "growhome-coop-audit-backups");
+            string backup = WorldSync.BackupOwnWorld("audit", true, testBackups);     // a folder of its own: the real backups are never pushed out by audits
+            bool backedUp = backup != null && File.Exists(backup) && Equal(File.ReadAllBytes(backup), File.ReadAllBytes(ownFile));
+            try { Directory.Delete(testBackups, true); } catch (Exception) { }
+            Check("LEADER-SAVE", "before other players come into the leader's world a copy of the leader's save is kept (the newest 10), so a bad session can be undone", backedUp, backup ?? "no backup");
 
             // leaving a party drops the players I only had because of it
             if (cb.CoopMenuState().Online)

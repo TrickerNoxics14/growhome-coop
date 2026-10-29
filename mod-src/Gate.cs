@@ -1,6 +1,6 @@
 namespace CoopMod
 {
-    public enum Route { Ignore, Visibility, Shared, Chat, Oversized, SnapshotNotFromHost, World }
+    public enum Route { Ignore, Visibility, Shared, Chat, Oversized, SnapshotNotFromHost, World, HaveWorld, Epoch }
 
     // The one place that decides what a reliable message from another player is allowed to do.
     //  - plant / crystal / island events: anybody may send them
@@ -9,13 +9,15 @@ namespace CoopMod
     public static class MessageGate
     {
         public const byte MsgVisibility = 3;
-        public const int MaxMessage = 2000000;
+        public const int MaxMessage = 4500000;   // big messages arrive in pieces (PeerLink) and are whole again here
 
         public static Route Classify(byte[] m, bool senderIsHost)
         {
             if (m == null || m.Length == 0) return Route.Ignore;
             if (m[0] == MsgVisibility) return Route.Visibility;
             if (m[0] == Chat.Msg) return m.Length > Chat.MaxBytes ? Route.Oversized : Route.Chat;
+            if (m[0] == Authority.MsgHaveWorld) return m.Length == 5 ? Route.HaveWorld : Route.Ignore;
+            if (m[0] == Authority.MsgEpoch) return m.Length == 5 && senderIsHost ? Route.Epoch : Route.Ignore;
             if (SharedWorld.IsMessage(m)) return m.Length > MaxMessage ? Route.Oversized : Route.Shared;
             if (m.Length > MaxMessage) return Route.Oversized;
             if (WorldSync.IsSnapshot(m) && !senderIsHost) return Route.SnapshotNotFromHost;

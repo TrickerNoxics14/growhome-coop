@@ -38,8 +38,68 @@ namespace CoopMod
             return null;
         }
 
-        public void SendReliable(byte[] data) { hub.SendTo(Id, data, 1, true); }
-        public byte[] ReceiveReliable() { return q1.Count > 0 ? q1.Dequeue() : null; }
+        // One reliable Steam message holds about 1 MB: anything bigger goes in pieces and is put together again on the other side.
+        public const byte MsgPiece = 0xB7;
+        public const int PieceSize = 512 * 1024, MaxPieces = 16;
+        static int pieceSeq = Environment.TickCount;
+        int asmId = int.MinValue, asmCount, asmTotal, asmHave; byte[] asmBuf; bool[] asmGot;
+
+        public void SendReliable(byte[] data)
+        {
+            var pieces = Pieces(data);
+            if (pieces == null) { CoopBehaviour.Log("net: a message of " + data.Length + " bytes is too big to send; dropped"); return; }
+            foreach (var m in pieces) hub.SendTo(Id, m, 1, true);
+        }
+
+        // the message as it goes out: itself when it fits one Steam message, else in pieces (null when too big even for that)
+        public static List<byte[]> Pieces(byte[] data)
+        {
+            var list = new List<byte[]>();
+            if (data.Length <= 900000) { list.Add(data); return list; }
+            int n = (data.Length + PieceSize - 1) / PieceSize;
+            if (n > MaxPieces) return null;
+            int id = ++pieceSeq;
+            for (int i = 0; i < n; i++)
+            {
+                int at = i * PieceSize, len = Math.Min(PieceSize, data.Length - at);
+                var m = new byte[13 + len];
+                m[0] = MsgPiece;
+                Buffer.BlockCopy(BitConverter.GetBytes(id), 0, m, 1, 4);
+                Buffer.BlockCopy(BitConverter.GetBytes((ushort)i), 0, m, 5, 2);
+                Buffer.BlockCopy(BitConverter.GetBytes((ushort)n), 0, m, 7, 2);
+                Buffer.BlockCopy(BitConverter.GetBytes(data.Length), 0, m, 9, 4);
+                Buffer.BlockCopy(data, at, m, 13, len);
+                list.Add(m);
+            }
+            return list;
+        }
+
+        public byte[] ReceiveReliable()
+        {
+            while (q1.Count > 0)
+            {
+                var m = q1.Dequeue();
+                if (m == null || m.Length == 0 || m[0] != MsgPiece) return m;
+                var whole = AddPiece(m);
+                if (whole != null) return whole;
+            }
+            return null;
+        }
+
+        // A piece of a big message; the whole message when this piece completes it. Every number is checked: a bad piece is dropped.
+        public byte[] AddPiece(byte[] m)
+        {
+            if (m.Length < 13) return null;
+            int id = BitConverter.ToInt32(m, 1), i = BitConverter.ToUInt16(m, 5), n = BitConverter.ToUInt16(m, 7), total = BitConverter.ToInt32(m, 9);
+            int len = m.Length - 13;
+            if (n < 2 || n > MaxPieces || i >= n || total <= 900000 || total > n * PieceSize || total <= (n - 1) * PieceSize) return null;
+            if (len != (i < n - 1 ? PieceSize : total - (n - 1) * PieceSize)) return null;
+            if (id != asmId || n != asmCount || total != asmTotal) { asmId = id; asmCount = n; asmTotal = total; asmBuf = new byte[total]; asmGot = new bool[n]; asmHave = 0; }
+            if (!asmGot[i]) { asmGot[i] = true; asmHave++; Buffer.BlockCopy(m, 13, asmBuf, i * PieceSize, len); }
+            if (asmHave < asmCount) return null;
+            var whole = asmBuf; asmBuf = null; asmGot = null; asmId = int.MinValue;
+            return whole;
+        }
         public string Diagnostics() { return hub.Diagnostics(Id) + (lan != null ? " | lan rx " + lanRx + ", steam rx " + steamRx : ""); }
         public void Close() { }
     }
@@ -104,8 +164,9 @@ namespace CoopMod
 
         public void SendTo(ulong id, byte[] data, int channel, bool reliable)
         {
-            SteamNetworking.SendP2PPacket(new CSteamID(id), data, (uint)data.Length,
+            bool sent = SteamNetworking.SendP2PPacket(new CSteamID(id), data, (uint)data.Length,
                 reliable ? EP2PSend.k_EP2PSendReliable : EP2PSend.k_EP2PSendUnreliableNoDelay, channel);
+            if (!sent && reliable) CoopBehaviour.Log("steam: a message of " + data.Length + " bytes to " + id + " could not be sent");
         }
 
         // Call once per frame: move everything Steam has received into the per-player queues.
