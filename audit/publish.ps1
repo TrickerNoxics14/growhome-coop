@@ -48,7 +48,7 @@ Copy-Item $ModDll (Join-Path $RepoDir 'CoopMod.dll') -Force
 Copy-Item (Join-Path $Root 'coopmod\*.cs'), (Join-Path $Root 'coopmod\CoopMod.csproj') (Join-Path $RepoDir 'mod-src') -Force
 Copy-Item (Join-Path $Root 'exe\*.cs'), (Join-Path $Root 'exe\GrowHomeCoop.csproj') (Join-Path $RepoDir 'installer-src') -Force
 New-Item -ItemType Directory -Force -Path (Join-Path $RepoDir 'audit') | Out-Null
-foreach ($f in 'run-audit.ps1', 'publish.ps1', 'required-checks.txt', 'CRITICAL-CHECKS.md', 'SECURITY.md') { Copy-Item (Join-Path $AuditDir $f) (Join-Path $RepoDir "audit\$f") -Force }
+foreach ($f in 'run-audit.ps1', 'publish.ps1', 'required-checks.txt', 'check-groups.txt', 'CRITICAL-CHECKS.md', 'SECURITY.md') { Copy-Item (Join-Path $AuditDir $f) (Join-Path $RepoDir "audit\$f") -Force }
 Copy-Item (Join-Path $AuditDir 'SECURITY.md') (Join-Path $RepoDir 'SECURITY.md') -Force
 Remove-Item (Join-Path $RepoDir 'audit\deploy.ps1') -ErrorAction SilentlyContinue         # it names the author's own laptop
 & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root 'build-setup.ps1') | Out-Null

@@ -26,6 +26,86 @@ namespace CoopMod
             public List<Party.Member> Members;
             public List<Party.Friend> Friends;
             public int FriendPage;
+            // the SPEEDRUN page (Speedrun.FillMenuState)
+            public int Screen;
+            public string SrCategory, SrMode, SrRunState, SrTime, SrInvalidWhy, SrPb;
+            public bool SrActive, SrRunning, SrFinished, SrValid, SrSplitsShown, SrLiveSplit, SrTimerHidden, SrIsMember, SrInParty;
+            public bool SrRaceArmed, SrRaceHost, SrCountdown; public int SrRaceReady, SrRaceTotal;
+        }
+
+        public const int ScreenParty = 0, ScreenSpeedrun = 1;
+        public static int ScreenNow;                 // which page the one copied menu shows: the party / co-op lines or the speedrun lines
+        public const string SpeedrunStartName = "ButtonSpeedrun", SpeedrunPauseName = "ButtonSpeedrunPause";
+        public static Button SpeedrunStartEntry, SpeedrunPauseEntry;
+
+        // The SPEEDRUN page. On the start screen: pick the category and mode, start; in the game: reset, end, hide the timer. Pure like RowsFor.
+        public static List<Row> SpeedrunRows(State s, out string line1, out string line2)
+        {
+            var rows = new List<Row>();
+            if (s.AtStart)
+            {
+                line1 = "NEW GAME IN A SPEEDRUN SAVE";
+                line2 = "YOUR OWN SAVE IS NOT TOUCHED";
+                if (s.SrCountdown)
+                {
+                    line1 = "THE RACE IS STARTING";
+                    line2 = "GET READY";
+                    rows.Add(new Row("sr_info", "RACE: " + s.SrCategory, true));
+                }
+                else if (s.SrRaceArmed && s.SrRaceHost)
+                {
+                    line1 = "WAITING FOR RACERS " + s.SrRaceReady + "/" + s.SrRaceTotal;
+                    line2 = "EVERYBODY GETS A FRESH SPEEDRUN SAVE";
+                    rows.Add(new Row("sr_info", "RACE: " + s.SrCategory, true));
+                    rows.Add(new Row("sr_go", "START RACE NOW " + s.SrRaceReady + "/" + s.SrRaceTotal + " READY"));
+                    rows.Add(new Row("sr_cancel", "CANCEL RACE"));
+                }
+                else if (s.SrRaceArmed)
+                {
+                    line1 = "RACE ARMED: " + s.SrCategory;
+                    line2 = "YOUR OWN SAVE IS NOT TOUCHED";
+                    rows.Add(new Row("sr_info", "WAITING FOR THE LEADER", true));
+                    rows.Add(new Row("sr_leave", "LEAVE THE RACE"));
+                }
+                else if (s.SrIsMember) rows.Add(new Row("sr_info", "LEADER PICKS: " + s.SrMode + " " + s.SrCategory, true));
+                else
+                {
+                    rows.Add(new Row("sr_cat", "CATEGORY: " + s.SrCategory));
+                    rows.Add(new Row("sr_mode", "MODE: " + s.SrMode));
+                    rows.Add(new Row("sr_start", s.SrMode == "RACE" ? "START RACE" : "START RUN"));
+                }
+                rows.Add(new Row("sr_pb", string.IsNullOrEmpty(s.SrPb) ? "NO PB YET" : "PB " + s.SrPb, true));
+                rows.Add(new Row("sr_splits", s.SrSplitsShown ? "SPLITS: SHOW" : "SPLITS: HIDE"));
+                rows.Add(new Row("sr_livesplit", s.SrLiveSplit ? "LIVESPLIT: ON" : "LIVESPLIT: OFF"));
+            }
+            else if (s.SrRunning)
+            {
+                line1 = s.SrCategory + "  " + s.SrTime;
+                line2 = s.SrValid ? "RUN VALID" : "INVALID: " + s.SrInvalidWhy;
+                rows.Add(new Row("sr_reset", "RESET RUN"));
+                if (s.SrMode == "SOLO") rows.Add(new Row("sr_restart", "RESET AND RESTART"));
+                rows.Add(new Row("sr_end", "END RUN (DNF)"));
+                if (s.SrMode == "RACE" && s.SrRaceHost) rows.Add(new Row("sr_endrace", "END RACE"));
+                rows.Add(new Row("sr_hide", s.SrTimerHidden ? "TIMER: HIDE" : "TIMER: SHOW"));
+            }
+            else if (s.SrActive)
+            {
+                line1 = (s.SrFinished && s.SrRunState == "FINISHED" ? "RUN FINISHED  " : "RUN ENDED  ") + s.SrTime;
+                line2 = "SAVE AND QUIT TO LEAVE THE SPEEDRUN SAVE";
+                rows.Add(new Row("sr_hide", s.SrTimerHidden ? "TIMER: HIDE" : "TIMER: SHOW"));
+            }
+            else
+            {
+                line1 = "NO SPEEDRUN NOW";
+                line2 = "START ONE FROM THE START MENU";
+            }
+            var capped = new List<Row>();
+            int actions = 0;
+            foreach (var r in rows) { if (r.Inert) capped.Add(r); else if (actions < MaxRows - 1) { capped.Add(r); actions++; } }
+            capped.Add(new Row("back", "BACK"));
+            if (line1.Length > 34) line1 = line1.Substring(0, 34);
+            if (line2.Length > 44) line2 = line2.Substring(0, 44);
+            return capped;
         }
 
         public struct Row
@@ -38,6 +118,7 @@ namespace CoopMod
         // The lines for a state: member lines first, then at most MaxRows lines that do something, BACK always last. Pure, so the audit checks every state.
         public static List<Row> RowsFor(State s, out string line1, out string line2)
         {
+            if (s.Screen == ScreenSpeedrun) return SpeedrunRows(s, out line1, out line2);
             var rows = new List<Row>();
             string leader = Party.Short(string.IsNullOrEmpty(s.Leader) ? "THE LEADER" : s.Leader, Party.NameLength);
             if (!s.Online)
@@ -135,7 +216,8 @@ namespace CoopMod
         {
             if (!Singleton<GUIManager>.Exists) return;
             var gm = Singleton<GUIManager>.Instance;
-            if (gm == builtFor || gm.m_Menus == null || gm.m_Menus.Count == 0) return;
+            if (gm == builtFor) { PauseEntryTick(); return; }
+            if (gm.m_Menus == null || gm.m_Menus.Count == 0) return;
             builtFor = gm;
             try { Build(gm, mod); Builds++; CoopBehaviour.Log("ui: CO-OP menu added to the pause menu" + (StartEntry != null ? " and the start menu" : "")); }
             catch (Exception e) { LastProblem = SharedWorld.Short(e); CoopBehaviour.Log("ui: could not add the CO-OP menu (the F2/F3 keys still work): " + LastProblem); }
@@ -194,6 +276,40 @@ namespace CoopMod
                 if (start != null) StartEntry = AddLine(Child(start.transform, "Panel/ButtonPanel/SettingsButton"), 0, StartEntryName, "CO-OP PARTY", OpenFromStart);
             }
             catch (Exception e) { LastProblem = "start menu: " + SharedWorld.Short(e); CoopBehaviour.Log("ui: no CO-OP PARTY line in the start menu: " + LastProblem); }
+
+            // 4. speedruns: SPEEDRUN above CO-OP PARTY in the start menu, and under CO-OP in the pause menu while a run is in its save slot
+            SpeedrunStartEntry = null; SpeedrunPauseEntry = null;
+            try
+            {
+                if (StartEntry != null) SpeedrunStartEntry = AddLine(StartEntry.transform, 0, SpeedrunStartName, "SPEEDRUN", OpenSpeedrunFromStart);
+                SpeedrunPauseEntry = AddLine(Entry.transform, 1, SpeedrunPauseName, "SPEEDRUN", OpenSpeedrunFromPause);
+                SpeedrunPauseEntry.gameObject.SetActive(Speedrun.SlotActive);
+            }
+            catch (Exception e) { LastProblem = "speedrun lines: " + SharedWorld.Short(e); CoopBehaviour.Log("ui: no SPEEDRUN line: " + LastProblem); }
+        }
+
+        public static void OpenSpeedrunFromStart()
+        {
+            if (Menu == null || !Singleton<GUIManager>.Exists || FadeScreen.FadeInProgress) return;
+            GUIMonoBehaviour.PlayPositiveClickSound();
+            ScreenNow = ScreenSpeedrun;
+            Singleton<GUIManager>.Instance.ActivateMenu(Menu);
+        }
+
+        public static void OpenSpeedrunFromPause()
+        {
+            if (Menu == null || !Singleton<GUIManager>.Exists || FadeScreen.FadeInProgress) return;
+            GUIMonoBehaviour.PlayPositiveClickSound();
+            ScreenNow = ScreenSpeedrun;
+            Singleton<GUIManager>.Instance.ActivateMenu(Menu);
+        }
+
+        // the pause menu's SPEEDRUN line is there only while a run uses the slot
+        static void PauseEntryTick()
+        {
+            if (SpeedrunPauseEntry == null) return;
+            bool want = Speedrun.SlotActive;
+            if (SpeedrunPauseEntry.gameObject.activeSelf != want) SpeedrunPauseEntry.gameObject.SetActive(want);
         }
 
         // a copy of one of the menu's own lines, placed next to it (offset 0 = above, 1 = below), with its own label and action
@@ -215,6 +331,7 @@ namespace CoopMod
         {
             if (Menu == null || !Singleton<GUIManager>.Exists || FadeScreen.FadeInProgress) return;
             GUIMonoBehaviour.PlayPositiveClickSound();
+            ScreenNow = ScreenParty;
             Singleton<GUIManager>.Instance.ActivateMenu(Menu);
         }
 
@@ -223,6 +340,7 @@ namespace CoopMod
         public static void OpenFromStart(bool sound)
         {
             if (Menu == null || !Singleton<GUIManager>.Exists || FadeScreen.FadeInProgress) return;
+            ScreenNow = ScreenParty;
             if (sound) GUIMonoBehaviour.PlayPositiveClickSound();
             Singleton<GUIManager>.Instance.ActivateMenu(Menu);
             var h = Menu.GetComponent<CoopMenuHandler>();
@@ -399,7 +517,7 @@ namespace CoopMod
             var rows = CoopMenu.RowsFor(state, out l1, out l2);
             if (Line1 != null) Line1.text = l1;
             if (Line2 != null) Line2.text = l2;
-            if (Title != null) Title.text = state.AtStart ? "PARTY" : "CO-OP";
+            if (Title != null) Title.text = state.Screen == CoopMenu.ScreenSpeedrun ? "SPEEDRUN" : state.AtStart ? "PARTY" : "CO-OP";
             string key = "";
             foreach (var r in rows) key += (r.Inert ? "~" : "") + r.Id + "=" + r.Label + "|";
             var es = EventSystem.current;

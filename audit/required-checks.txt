@@ -75,3 +75,41 @@ LEADER-SAVE          | game   | only the leader's save is real: the leader answe
 PLANT-LEADER         | game   | in a party the leader's plant is the real one: a guest's plant built on an older copy is refused and answered with the leader's, one built on the newest is taken and passed on, guests take plants only from the leader
 PARTY-LEAVE          | game   | after a party my saves are my own again on the start screen, and leaving a party drops the players I only had because of it
 ROOM-DEFAULT         | game   | the room the F2 menu Enter key picks is read from the settings (ask = listed and I accept, private = private, anything else = public)
+NET-FX                | game   | the jetpack and flower/leaf fields of a pose packet read back exactly; cut-off packets and silly values are refused; packets without them still read
+CLONE-FX              | game   | a friend's jetpack flame and flower/leaf show on their copy as looks only (no scripts, physics or colliders), go away when they stop or the link goes quiet, and change nothing of mine
+PICKUP-SYNC           | game   | a flower or leaf I take is announced once (a dropped leaf never); a friend's disappears here and grows back without going into my inventory; broken messages remove nothing
+CLONE-SCRIPTS         | game   | a friend's copy runs none of the game's scripts that reach my walkster, HUD, save, input, camera or voice (water death, idle voice, hints, drone camera, crystal locator, fall death, jetpack, flower/leaf...), has its guard, and leaves no skin callback in the load queue when removed
+CLONE-VOICE           | game   | a friend's jump never plays a voice line from my BUD; the line plays from their copy's own voice source
+CLONE-VOICE-RESTORE   | game   | after the copy's jump step my voice, the leaf-jump hook and the achievement hook are mine again; a leaf achievement the copy adds is taken back unheard, its foley follows the copy and my rumble is cut
+CLONE-IMMORTAL        | game   | a friend's copy cannot be knocked out: a 30 m/s bump neither cuts my voice nor counts a death in my stats, and a cleared flag is set again at once
+CLONE-NO-CHUNK        | game   | the game's chunker (venus trap, ram, drowning...) cannot destroy a friend's copy: it stays with its driver and walker and is back on 2 frames later
+NET-FX-EVENT          | game   | voice lines, hard landings and deaths ride behind the old pose layout: exact round trip, cut-off and silly ones refused, each played once; a friend's line plays from their copy, their landing raises dust and a grunt at the copy, their death blows up the copy and it comes back on respawn, and my own lines and landings are announced as the game measures them
+SR-TIMER              | game   | the speedrun timer is real time (RTA): exact milliseconds with an injected clock, never paused by a stopped game, no overflow in 30 h, times shown as h:mm:ss.cc
+SR-SPLITS-ANY         | game   | Any% and Any% NG+ split in order (a later split skips the ones before, a repeat never splits again) and end only on the computer switch after the first seed
+SR-SPLITS-ASS         | game   | All Star Seeds splits on islands, flower, first seed, first ending and every seed up to N-1, and ends only on the fade after the last seed (at most 16 splits)
+SR-SPLITS-100         | game   | 100% splits in any order, ends on the last seed delivered with 100 crystals and the full databank, and a last seed sent too early can never finish
+SR-COMPARE            | game   | the live +/- against the PB, gold for a new best segment, sum of best and the timer colour are worked out right
+SR-RECORDS            | game   | PB and best segments are saved and read back exactly; a slower run keeps the PB but improves beaten segments; invalid runs are never recorded; a damaged file falls back to its backup
+SR-MENU-ROWS          | game   | every speedrun menu page has at most 7 lines that do something with BACK last; members cannot start a run, races cannot restart alone; the party pages are unchanged
+SR-VALIDITY           | game   | Any% is invalid with an unlocked or worn Ninja/Native skin, NG+ and 100% allow them, assists invalidate solo and race runs, an early last seed invalidates 100%
+SR-LIVESPLIT          | game   | LiveSplit's TCP server gets start, split and reset in order; without LiveSplit a send costs under 5 ms and throws nothing
+SR-MENU               | game   | the start menu has a SPEEDRUN line above CO-OP PARTY that opens the SPEEDRUN page of the game's own menu, inside its panel
+SR-START-FRAME        | game   | START RUN starts the timer on the frame of the game's own NEW GAME (the game says it is fresh), and nothing starts without the speedrun save slot
+SR-CLOUD-OFF          | game   | a speedrun is refused while Steam Cloud saving is on (NEW GAME would delete the cloud save): no game starts, the slot is left, my save is unchanged
+SR-NEWGAME-FRESH      | game   | the slot game is a fresh new game: no seeds, no first seed, and Any% has no Ninja/Native skin even when my own profile has them
+SR-EVENTS-LIVE        | game   | the game's own accomplishment, crystal and databank events reach the run inside the call (split stamped in that frame), a repeat never splits again
+SR-BACKUP-GUARD       | game   | during a speedrun no backup of the slot world is made, so my real world backups are never pushed out
+SR-SKIN-GUARD         | game   | my saved co-op skin (coop-skin.txt) is neither put on in the slot game nor overwritten by it
+SR-PERF               | game   | the speedrun tick costs under 0.2 ms a frame and makes almost no garbage
+SR-UI                 | game   | the timer panel and results card draw every state without an exception and stay on screen from 800x450 to 4K
+SR-RESET-RESTORE      | game   | RESET RUN counts the attempt, logs RESET, Save & Quits to the start screen and gives me my own saves and CONTINUE back
+SR-SLOT-ISOLATION     | game   | two speedruns (forced saves, a reset, a finish, Save & Quit) leave my own level save, profile and backups byte-identical; each run starts in a wiped slot
+SR-LEVER-END          | game   | Any% stops inside the computer switch's own event after the first seed
+SR-100-END            | game   | 100% stops inside the game's AddSeed of the last seed once 100 crystals and all 20 databank entries are done
+SR-ASS-END            | game   | All Star Seeds stops when the fade after the last seed is complete (FinalSequenceViewed + the fade-out time, on the cut to the computer)
+SR-RECORDS-LIVE       | game   | a finished run is logged as FINISHED and saved as the PB, with attempts and finishes counted
+SR-GATE               | game   | race and co-op run messages (20-25) are taken only at their exact size, ARM/GO/CANCEL only from the leader, hostile fields refused, PROGRESS limited to 5 a second, and older mods ignore them
+SR-RACE-FSM           | game   | a race arms, waits at most 15 s for READY (late or other-version racers are left out), counts down, marks silent racers OFFLINE then DNF and ranks the results with ties
+SR-RACE-LOOP          | game   | a whole race with fake players: own slots, READY, one GO with every start on its frame, live opponent progress, OFFLINE/DNF, ranked results, cancel and version mismatch
+SR-COOP-TIMER         | game   | a co-op run has the leader's timer only, shown by members within 50 ms; members' splits and databank entries count once and only from the leader's world; HOST LOST; exact final time
+SR-RACE-ISOLATION     | game   | in a speedrun slot no plant, crystal, island, teleporter, pickup, world, epoch or have-world message from another player changes anything, and my world is never sent

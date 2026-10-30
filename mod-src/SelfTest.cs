@@ -14,7 +14,7 @@ namespace CoopMod
     // and writes coop-selftest-result.txt with one line per check:   CHECK <ID> <PASS|FAIL> <what> - <detail>
     // A required check that never reported counts as failed, so a check that crashes or is skipped cannot hide.
     // "quick" in coop-selftest.txt runs a shorter growth phase (development only; the audit uses the full run).
-    public class SelfTest : MonoBehaviour
+    public partial class SelfTest : MonoBehaviour
     {
         class Sink : ITransport
         {
@@ -36,8 +36,67 @@ namespace CoopMod
         int pass, fail, warn;
         bool finished, quick;
         byte[] lastPlantMessage;                  // a real plant update, kept for the fuzz test
+        List<string> groups;                      // null = every section (a full audit); otherwise only the sections tagged with one of these (quick audit)
 
         static string Here(string file) { return Path.Combine(Directory.GetParent(Application.dataPath).FullName, file); }
+
+        // Each section of the scenario is tagged with one or more groups (comma separated). A quick audit (run-audit.ps1 -Quick -Groups ...)
+        // writes "groups=a,b" into coop-selftest.txt; a section none of whose groups was chosen is skipped and reports nothing.
+        // Keep the tags in step with audit\check-groups.txt.
+        bool On(string tags)
+        {
+            if (groups == null) return true;
+            foreach (var t in tags.Split(',')) if (groups.Contains(t.Trim())) return true;
+            return false;
+        }
+
+        void ReadSettings()
+        {
+            string text = "";
+            try { text = File.ReadAllText(Here("coop-selftest.txt")); } catch (Exception) { }
+            quick = text.Contains("quick");
+            foreach (var raw in text.Split('\n'))
+            {
+                string line = raw.Trim();
+                if (!line.StartsWith("groups=")) continue;
+                groups = new List<string>();
+                foreach (var g in line.Substring(7).Split(',')) if (g.Trim().Length > 0) groups.Add(g.Trim().ToLower());
+            }
+            if (groups != null) Note("quick audit: only the sections of the groups " + string.Join(",", groups.ToArray()) + " run");
+        }
+
+        delegate bool Cond();
+
+        // Waits until the condition holds (and has kept holding for stableFor seconds), or until the timeout ends, whichever comes first.
+        // Only for waits on something observable; a wait that proves something does NOT happen within a time stays a fixed wait.
+        // The check that follows reads the state itself, so a timeout simply leads to the same failed check as the old fixed wait.
+        static IEnumerator WaitUntil(Cond cond, float timeout, float stableFor)
+        {
+            float end = Time.time + timeout, okSince = -1f;
+            while (Time.time < end)
+            {
+                bool ok = false;
+                try { ok = cond(); } catch (Exception) { }
+                if (!ok) okSince = -1f;
+                else
+                {
+                    if (okSince < 0f) okSince = Time.time;
+                    if (Time.time - okSince >= stableFor) yield break;
+                }
+                yield return null;
+            }
+        }
+
+        static string ReadShared(string file)
+        {
+            try
+            {
+                if (!File.Exists(file)) return "";
+                using (var s = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                using (var r = new StreamReader(s)) return r.ReadToEnd();
+            }
+            catch (Exception) { return ""; }
+        }
         static void Log(string m) { CoopBehaviour.Log("selftest: " + m); }
 
         void Awake()
@@ -333,6 +392,150 @@ namespace CoopMod
 
 
         // Players are shown by their Steam names, cleaned so that nothing odd can reach the screen.
+        // The jetpack and flower/leaf fields of a pose packet: read back exactly, never accepted cut off or with silly values, old packets still read.
+        void CheckNetFx()
+        {
+            var held = new[] { new PlayerState.Held { id = 11, pos = new Vector3(1, 2, 3), rot = Quaternion.identity }, new PlayerState.Held { id = 12, pos = new Vector3(4, 5, 6), rot = Quaternion.Euler(0, 90, 0) } };
+            Quaternion q = Quaternion.Euler(10, 20, 30);
+            var fx = new PlayerState { seq = 9, pos = new Vector3(10, 4, -20), camForward = Vector3.forward, jet = true, fly = 2, petals = 5, flyOffset = new Vector3(0.3f, 1.2f, -0.4f), flyRot = q, held = held };
+            byte[] fxBytes = fx.Write();
+            var b = PlayerState.Read(fxBytes);
+            bool same = b != null && b.jet && b.fly == 2 && b.petals == 5 && (b.flyOffset - fx.flyOffset).magnitude < 0.0001f && Mathf.Abs(Quaternion.Dot(b.flyRot, q)) > 0.99999f
+                && b.held.Length == 2 && b.held[1].id == 12 && (b.held[1].pos - held[1].pos).magnitude < 0.0001f;
+            Check("NET-FX", "a packet with the jetpack on, a flower (5 petals) and 2 held objects reads back exactly", same, b == null ? "refused" : "jet=" + b.jet + " fly=" + b.fly + " petals=" + b.petals + " held=" + b.held.Length);
+
+            var leaf = new PlayerState { seq = 10, pos = fx.pos, camForward = Vector3.forward, fly = 1, wear = 3, flyOffset = new Vector3(0, 3, 0), flyRot = q };
+            var lb = PlayerState.Read(leaf.Write());
+            Check("NET-FX", "a packet with a leaf (wear 3) reads back", lb != null && lb.fly == 1 && lb.wear == 3 && !lb.jet, lb == null ? "refused" : "fly=" + lb.fly + " wear=" + lb.wear);
+
+            int accepted = 0, escaped = 0, before = -1;
+            int trailerAt = fxBytes.Length - 30;
+            for (int cut = 0; cut < fxBytes.Length; cut++)
+            {
+                var c = new byte[cut]; Buffer.BlockCopy(fxBytes, 0, c, 0, cut);
+                try { if (PlayerState.Read(c) != null) { accepted++; if (cut == trailerAt) before = cut; } } catch (Exception) { escaped++; }
+            }
+            Check("NET-FX", "every cut-off jetpack/flower packet is refused, also one cut just before the flower data", accepted == 0 && escaped == 0, accepted + " accepted, " + escaped + " threw" + (before >= 0 ? " (the one cut before the flower data was accepted)" : ""));
+
+            Func<Action<PlayerState>, byte[]> make = tweak => { var s = new PlayerState { seq = 11, pos = fx.pos, camForward = Vector3.forward, fly = 2, petals = 3, flyRot = Quaternion.identity }; tweak(s); return s.Write(); };
+            var hostile = new Dictionary<string, byte[]>();
+            var both = make(s => { }); both[1 + 4 + 36 + 8] |= 64; hostile["flower and leaf at once"] = both;      // the flag byte: marker, seq, 3 vectors, stick
+            hostile["NaN flower rotation"] = make(s => s.flyRot = new Quaternion(float.NaN, 0, 0, 1));
+            hostile["flower a million metres away"] = make(s => s.flyOffset = new Vector3(1e6f, 0, 0));
+            hostile["200 petals"] = make(s => s.petals = 200);
+            var noTrailer = new PlayerState { seq = 12, pos = fx.pos, camForward = Vector3.forward }.Write(); noTrailer[1 + 4 + 36 + 8] |= 32;
+            hostile["flower bit without its data"] = noTrailer;
+            string leaked = "";
+            foreach (var kv in hostile) { try { if (PlayerState.Read(kv.Value) != null) leaked += kv.Key + "; "; } catch (Exception) { leaked += kv.Key + " (threw); "; } }
+            Check("NET-FX", "jetpack/flower packets with impossible values are thrown away", leaked.Length == 0, leaked.Length == 0 ? hostile.Count + " kinds tried" : "accepted: " + leaked);
+
+            var old = new PlayerState { seq = 5, pos = new Vector3(10, 4, -20), vel = new Vector3(1, 0, 2), camForward = Vector3.forward, move = new Vector2(0.5f, 1f), skin = 3, jumpScale = 0.5f };
+            var ob = PlayerState.Read(old.Write());
+            Check("NET-FX", "a packet without jetpack or flower (the old layout) still reads, with nothing switched on", ob != null && ob.fly == 0 && !ob.jet && ob.skin == 3, ob == null ? "refused" : "fly=" + ob.fly + " jet=" + ob.jet);
+        }
+
+        // The one-off events at the end of a pose packet (a voice line, a hard landing, a death): read back exactly, never accepted cut off or
+        // with silly values, invisible to an old reader, and a packet without them reads as before.
+        void CheckNetFxEvents()
+        {
+            var pos = new Vector3(10, 4, -20);
+            Func<FxEvent[], PlayerState> state = ev => new PlayerState { seq = 21, pos = pos, camForward = Vector3.forward, fly = 2, petals = 4, flyRot = Quaternion.identity, events = ev };
+            var all = new[] {
+                new FxEvent { id = 65534, kind = FxEvent.Voice, voice = "Voice.BouncyLeafJump" },
+                new FxEvent { id = 65535, kind = FxEvent.Grunt, point = pos + new Vector3(0.5f, -1f, 0.2f), normal = Vector3.up },
+                new FxEvent { id = 0, kind = FxEvent.Lethal, point = pos - Vector3.up, normal = new Vector3(0f, 0.8f, 0.6f) },
+                new FxEvent { id = 1, kind = FxEvent.Death, cause = FxEvent.CauseWater } };
+            byte[] bytes = state(all).Write();
+            var b = PlayerState.Read(bytes);
+            bool same = b != null && b.events.Length == 4 && b.fly == 2 && b.petals == 4
+                && b.events[0].id == 65534 && b.events[0].kind == FxEvent.Voice && b.events[0].voice == "Voice.BouncyLeafJump"
+                && b.events[1].kind == FxEvent.Grunt && (b.events[1].point - all[1].point).magnitude < 0.0001f && (b.events[1].normal - Vector3.up).magnitude < 0.0001f
+                && b.events[2].id == 0 && b.events[2].kind == FxEvent.Lethal && (b.events[2].normal - all[2].normal).magnitude < 0.0001f
+                && b.events[3].kind == FxEvent.Death && b.events[3].cause == FxEvent.CauseWater;
+            Check("NET-FX-EVENT", "a packet with a voice line, a hard and a deadly landing and a death (and a flower) reads back exactly", same, b == null ? "refused" : b.events.Length + " events");
+
+            var six = new FxEvent[6]; for (int i = 0; i < 6; i++) six[i] = new FxEvent { id = (ushort)(10 + i), kind = FxEvent.Death, cause = 0 };
+            var sb = PlayerState.Read(state(six).Write());
+            Check("NET-FX-EVENT", "at most the newest 4 events go into one packet", sb != null && sb.events.Length == 4 && sb.events[0].id == 12 && sb.events[3].id == 15, sb == null ? "refused" : sb.events.Length + " events, first " + (sb.events.Length > 0 ? sb.events[0].id : -1));
+
+            int accepted = 0, escaped = 0;
+            for (int cut = 0; cut < bytes.Length; cut++)
+            {
+                var c = new byte[cut]; Buffer.BlockCopy(bytes, 0, c, 0, cut);
+                try { if (PlayerState.Read(c) != null) accepted++; } catch (Exception) { escaped++; }
+            }
+            Check("NET-FX-EVENT", "every cut-off packet with events is refused, also one cut right after the flower data", accepted == 0 && escaped == 0, accepted + " accepted, " + escaped + " threw");
+
+            // an old reader stops after the flower/leaf bytes: the packet must be exactly the old packet plus the events behind it
+            byte[] plain = state(new FxEvent[0]).Write();
+            bool prefix = bytes.Length > plain.Length;
+            for (int i = 0; prefix && i < plain.Length; i++) if ((i == 49 ? (byte)(bytes[i] & 127) : bytes[i]) != plain[i]) prefix = false;
+            var pb = PlayerState.Read(plain);
+            Check("NET-FX-EVENT", "events only add bytes behind the old layout (an old reader sees the same packet), and a packet without them reads with none", prefix && pb != null && pb.events.Length == 0 && pb.fly == 2, "prefix=" + prefix + ", plain read=" + (pb != null));
+
+            Func<FxEvent, byte[]> one = e => new PlayerState { seq = 22, pos = pos, camForward = Vector3.forward, events = new[] { e } }.Write();
+            var hostile = new Dictionary<string, byte[]>();
+            var bank = one(new FxEvent { id = 1, kind = FxEvent.Voice, voice = "Voice.Abcdefghi" });
+            byte[] toys = Encoding.ASCII.GetBytes("Toys.BouncyLeaf"); Buffer.BlockCopy(toys, 0, bank, bank.Length - toys.Length, toys.Length);
+            hostile["a sound outside the voice bank"] = bank;
+            var slash = one(new FxEvent { id = 1, kind = FxEvent.Voice, voice = "Voice.Jumpy" }); slash[slash.Length - 2] = (byte)'/';
+            hostile["a voice name with a slash"] = slash;
+            var longer = one(new FxEvent { id = 1, kind = FxEvent.Voice, voice = "Voice.Jump" }); longer[longer.Length - 11] = 60;   // runs past the end: checked below
+            var at40 = one(new FxEvent { id = 1, kind = FxEvent.Voice, voice = "Voice." + new string('a', FxEvent.MaxVoiceLen - 6) });   // the longest allowed name, made one longer by hand
+            var tooLong = new byte[at40.Length + 1]; Buffer.BlockCopy(at40, 0, tooLong, 0, at40.Length);
+            tooLong[at40.Length] = (byte)'a'; tooLong[at40.Length - FxEvent.MaxVoiceLen - 1] = (byte)(FxEvent.MaxVoiceLen + 1);
+            hostile["a voice name longer than allowed"] = tooLong;
+            hostile["a landing 100 m from the sender"] = one(new FxEvent { id = 1, kind = FxEvent.Grunt, point = pos + Vector3.right * 100f, normal = Vector3.up });
+            hostile["a landing with a NaN normal"] = one(new FxEvent { id = 1, kind = FxEvent.Lethal, point = pos, normal = new Vector3(float.NaN, 1f, 0f) });
+            hostile["a landing with no normal"] = one(new FxEvent { id = 1, kind = FxEvent.Grunt, point = pos, normal = Vector3.zero });
+            hostile["a death with an unknown cause"] = one(new FxEvent { id = 1, kind = FxEvent.Death, cause = 7 });
+            hostile["an unknown kind of event"] = one(new FxEvent { id = 1, kind = 9, cause = 0 });
+            var zero = one(new FxEvent { id = 1, kind = FxEvent.Death, cause = 0 }); zero[zero.Length - 5] = 0; hostile["the event flag with a count of 0"] = zero;
+            var five = one(new FxEvent { id = 1, kind = FxEvent.Death, cause = 0 }); five[five.Length - 5] = 5; hostile["a count of 5"] = five;
+            // a bad event is dropped, but the pose in the same packet still counts (the copy must not freeze)
+            string leaked = "";
+            foreach (var kv in hostile)
+            {
+                try { var h = PlayerState.Read(kv.Value); if (h == null) leaked += kv.Key + " (pose lost); "; else if (h.events.Length != 0) leaked += kv.Key + "; "; }
+                catch (Exception) { leaked += kv.Key + " (threw); "; }
+            }
+            Check("NET-FX-EVENT", "events with impossible values are dropped and the pose in the same packet is kept", leaked.Length == 0, leaked.Length == 0 ? hostile.Count + " kinds tried" : "wrong: " + leaked);
+
+            // a cut-off event list is a damaged packet: refused as a whole
+            var noData = new PlayerState { seq = 23, pos = pos, camForward = Vector3.forward }.Write(); noData[49] |= 128;
+            bool noDataRefused; try { noDataRefused = PlayerState.Read(noData) == null; } catch (Exception) { noDataRefused = false; }
+            bool longerRefused; try { longerRefused = PlayerState.Read(longer) == null; } catch (Exception) { longerRefused = false; }
+            Check("NET-FX-EVENT", "the event flag without events, or a voice name running past the end, is refused", noDataRefused && longerRefused, "flag only refused=" + noDataRefused + ", long name refused=" + longerRefused);
+
+            // a newer version may add more behind the events, or new kinds: what this version knows is kept
+            var extra = one(new FxEvent { id = 1, kind = FxEvent.Death, cause = 0 }); var tail = new byte[extra.Length + 3]; Buffer.BlockCopy(extra, 0, tail, 0, extra.Length);
+            var te = PlayerState.Read(tail);
+            var mixed = PlayerState.Read(state(new[] {
+                new FxEvent { id = 30, kind = FxEvent.Death, cause = 0 },
+                new FxEvent { id = 31, kind = FxEvent.Grunt, point = pos + Vector3.right * 100f, normal = Vector3.up },
+                new FxEvent { id = 32, kind = FxEvent.Voice, voice = "Voice.Jump" },
+                new FxEvent { id = 33, kind = 9, cause = 0 } }).Write());
+            bool mixedOk = mixed != null && mixed.events.Length == 2 && mixed.events[0].id == 30 && mixed.events[1].id == 32 && mixed.fly == 2;
+            Check("NET-FX-EVENT", "bytes behind the events and a kind this version does not know keep the pose and the known events",
+                te != null && te.events.Length == 1 && te.events[0].kind == FxEvent.Death && mixedOk,
+                "trailer read=" + (te != null) + (te != null ? " (" + te.events.Length + " events)" : "") + ", mixed=" + (mixed == null ? "refused" : mixed.events.Length + " events"));
+
+            // the receiving side plays each event once although it comes in several packets, also across the counter's wrap-around
+            var p = new Peer { Id = 4242UL, Number = 9 };
+            var first = PlayerState.Read(state(new[] { all[0], all[1] }).Write());
+            var again = PlayerState.Read(state(new[] { all[0], all[1], all[2] }).Write());
+            // no copy here, so nothing is shown: count what the filter lets through instead
+            int t0 = p.FxTaken; CoopBehaviour.ApplyFxEvents(p, first);
+            int t1 = p.FxTaken; CoopBehaviour.ApplyFxEvents(p, again);
+            int t2 = p.FxTaken; CoopBehaviour.ApplyFxEvents(p, again);
+            int t3 = p.FxTaken;
+            var older = PlayerState.Read(state(new[] { all[1] }).Write());   // 65535 arriving after 0: older, never again
+            CoopBehaviour.ApplyFxEvents(p, older);
+            int a1 = t1 - t0, a2 = t2 - t1, a3 = t3 - t2, a4 = p.FxTaken - t3;
+            Check("NET-FX-EVENT", "events repeated in later packets are taken once each, across the number wrap-around", p.FxIdKnown && p.LastFxId == 0 && a1 == 2 && a2 == 1 && a3 == 0 && a4 == 0,
+                "last taken " + p.LastFxId + ", taken per packet " + a1 + "/" + a2 + "/" + a3 + "/" + a4 + " (want 2/1/0/0)");
+        }
+
         void CheckNames()
         {
             Check("PLAYER-NAMES", "a normal name stays as it is", PlayerNames.Clean("TrickerSonic14", "Player 1") == "TrickerSonic14", "");
@@ -550,6 +753,8 @@ namespace CoopMod
             r = MessageGate.Classify(new byte[] { 1 }, false); Check("GATE-ROUTING", "gate: a world request is accepted from anybody", r == Route.World, r.ToString());
             big[0] = 2;
             r = MessageGate.Classify(big, true); Check("GATE-ROUTING", "gate: an oversized snapshot is refused even from the host", r == Route.Oversized, r.ToString());
+            var pick = new byte[14]; pick[0] = SharedWorld.MsgPickup;
+            r = MessageGate.Classify(pick, false); Check("GATE-ROUTING", "gate: a taken flower/leaf from any player is accepted", r == Route.Shared, r.ToString());
         }
 
         // ---- save safety -------------------------------------------------------------------------------------------------------------
@@ -591,20 +796,24 @@ namespace CoopMod
         IEnumerator Run()
         {
             Log("started");
-            try { quick = File.ReadAllText(Here("coop-selftest.txt")).Contains("quick"); } catch (Exception) { }
-            try { CheckCompressor(); } catch (Exception e) { Check("AUDIT-ERROR", "compressor checks ran", false, Describe(e)); }
-            try { CheckGate(); } catch (Exception e) { Check("AUDIT-ERROR", "gate checks ran", false, Describe(e)); }
-            try { CheckUpdateNotice(); } catch (Exception e) { Check("AUDIT-ERROR", "update notice checks ran", false, Describe(e)); }
-            try { CheckNetSanity(); } catch (Exception e) { Check("AUDIT-ERROR", "network sanity checks ran", false, Describe(e)); }
-            try { CheckNames(); } catch (Exception e) { Check("AUDIT-ERROR", "name checks ran", false, Describe(e)); }
-            try { CheckChat(); } catch (Exception e) { Check("AUDIT-ERROR", "chat checks ran", false, Describe(e)); }
-            try { CheckSecurity(); } catch (Exception e) { Check("AUDIT-ERROR", "security checks ran", false, Describe(e)); }
-            try { CheckRooms(); } catch (Exception e) { Check("AUDIT-ERROR", "room checks ran", false, Describe(e)); }
-            try { CheckParty(); } catch (Exception e) { Check("PARTY", "party checks ran", false, Describe(e)); }
-            try { CheckLeaderSave(); } catch (Exception e) { Check("WORLD-PARTS", "world part checks ran", false, Describe(e)); }
+            ReadSettings();
+            if (On("net")) try { CheckCompressor(); } catch (Exception e) { Check("AUDIT-ERROR", "compressor checks ran", false, Describe(e)); }
+            if (On("net")) try { CheckGate(); } catch (Exception e) { Check("AUDIT-ERROR", "gate checks ran", false, Describe(e)); }
+            if (On("ui")) try { CheckUpdateNotice(); } catch (Exception e) { Check("AUDIT-ERROR", "update notice checks ran", false, Describe(e)); }
+            if (On("net")) try { CheckNetSanity(); } catch (Exception e) { Check("AUDIT-ERROR", "network sanity checks ran", false, Describe(e)); }
+            if (On("fx")) try { CheckNetFx(); } catch (Exception e) { Check("NET-FX", "jetpack/flower packet checks ran", false, Describe(e)); }
+            if (On("fx")) try { CheckNetFxEvents(); } catch (Exception e) { Check("NET-FX-EVENT", "voice/landing/death packet checks ran", false, Describe(e)); }
+            if (On("net")) try { CheckNames(); } catch (Exception e) { Check("AUDIT-ERROR", "name checks ran", false, Describe(e)); }
+            if (On("net")) try { CheckChat(); } catch (Exception e) { Check("AUDIT-ERROR", "chat checks ran", false, Describe(e)); }
+            if (On("net")) try { CheckSecurity(); } catch (Exception e) { Check("AUDIT-ERROR", "security checks ran", false, Describe(e)); }
+            if (On("net")) try { CheckRooms(); } catch (Exception e) { Check("AUDIT-ERROR", "room checks ran", false, Describe(e)); }
+            if (On("party")) try { CheckParty(); } catch (Exception e) { Check("PARTY", "party checks ran", false, Describe(e)); }
+            if (On("party")) try { CheckLeaderSave(); } catch (Exception e) { Check("WORLD-PARTS", "world part checks ran", false, Describe(e)); }
+            if (On("speedrun")) try { CheckSpeedrunPure(); } catch (Exception e) { Check("AUDIT-ERROR", "speedrun checks ran", false, Describe(e)); }
+            if (On("speedrun,net,party")) try { CheckSpeedrunNetPure(); } catch (Exception e) { Check("AUDIT-ERROR", "race and co-op run checks ran", false, Describe(e)); }
 
             float begin = Time.realtimeSinceStartup;
-            bool pressed = false, partyTested = false; float menuAt = -1f;
+            bool pressed = false, partyTested = !On("party"), srTested = !On("speedrun"); float menuAt = -1f;
             while (!WorldSync.InWorld())
             {
                 if (!pressed && StartMenuReady())
@@ -621,6 +830,13 @@ namespace CoopMod
                         yield return StartCoroutine(TestPartyMenu());
                         if (CoopMenu.Menu != null && CoopMenu.Menu.gameObject.activeInHierarchy) CoopMenu.Menu.Close();
                     }
+                    else if (Time.realtimeSinceStartup - menuAt > 2f && !srTested)
+                    {
+                        // speedruns start from the start screen: two runs in the speedrun save slot before the audit's own game
+                        srTested = true;
+                        yield return StartCoroutine(TestSpeedrunLive());
+                        if (CoopMenu.Menu != null && CoopMenu.Menu.gameObject.activeInHierarchy) CoopMenu.Menu.Close();
+                    }
                     else if (Time.realtimeSinceStartup - menuAt > 2f)
                     {
                         pressed = true;
@@ -633,17 +849,23 @@ namespace CoopMod
                 yield return null;
             }
             Log("in the world after " + (Time.realtimeSinceStartup - begin).ToString("F0") + " s; letting things settle");
-            yield return new WaitForSeconds(20f);
+            if (!On("world,plants,net,ui,clone,fx")) { Note("quick audit: no in-world group chosen; stopping in the world"); Finish(); yield break; }
+            yield return new WaitForSeconds(20f);     // fixed on purpose: nothing observable says the world has settled
 
             if (SharedWorld.MyId == 0UL) SharedWorld.MyId = 1UL;
             SharedWorld.TestSink = sink;
-            try { CheckSavePaths(); } catch (Exception e) { Check("AUDIT-ERROR", "save path checks ran", false, Describe(e)); }
-            try { CheckNamesLive(); } catch (Exception e) { Check("AUDIT-ERROR", "live name check ran", false, Describe(e)); }
-            try { CheckChatLive(); } catch (Exception e) { Check("AUDIT-ERROR", "live chat check ran", false, Describe(e)); }
-            try { CheckCursorLive(); } catch (Exception e) { Check("AUDIT-ERROR", "live mouse check ran", false, Describe(e)); }
-            try { CheckUiDump(); } catch (Exception e) { Check("UI-DUMP", "menu dump check ran", false, Describe(e)); }
-            yield return StartCoroutine(TestHudMessages());
-            yield return StartCoroutine(TestCoopMenu());
+            if (On("world")) try { CheckSavePaths(); } catch (Exception e) { Check("AUDIT-ERROR", "save path checks ran", false, Describe(e)); }
+            if (On("net")) try { CheckNamesLive(); } catch (Exception e) { Check("AUDIT-ERROR", "live name check ran", false, Describe(e)); }
+            if (On("net")) try { CheckChatLive(); } catch (Exception e) { Check("AUDIT-ERROR", "live chat check ran", false, Describe(e)); }
+            if (On("net,ui")) try { CheckCursorLive(); } catch (Exception e) { Check("AUDIT-ERROR", "live mouse check ran", false, Describe(e)); }
+            if (On("ui")) try { CheckUiDump(); } catch (Exception e) { Check("UI-DUMP", "menu dump check ran", false, Describe(e)); }
+            if (On("ui"))
+            {
+                bool displayWasHidden = CoopUI.Hidden; CoopUI.ShownForTest = true; CoopUI.Hidden = false;     // the player may have hidden the co-op display (F1): the messages are tested with it on
+                yield return StartCoroutine(TestHudMessages());
+                CoopUI.ShownForTest = false; CoopUI.Hidden = displayWasHidden;
+                yield return StartCoroutine(TestCoopMenu());
+            }
 
             var roots = new List<PlantRoot>();
             foreach (PlantRoot r in UnityEngine.Object.FindObjectsOfType(typeof(PlantRoot))) if (SharedWorld.PlantId(r) != null) roots.Add(r);
@@ -651,25 +873,29 @@ namespace CoopMod
             Note("found " + roots.Count + " plants");
             foreach (var r in roots) Note("  plant " + SharedWorld.PlantId(r) + (r.IsTrunk() ? " (trunk, " + (r.TrunkGrowthFraction * 100f).ToString("F1") + "% grown)" : "") + " at " + r.transform.position + ": " + Facts(r));
 
-            int tested = 0, others = 0;
-            foreach (var r in roots)
+            if (On("plants"))
             {
-                if (r == null) continue;
-                if (!r.IsTrunk() && ++others > 2) break;
-                yield return StartCoroutine(TestPlant(r, r.IsTrunk() ? "trunk" : "plant " + others, quick ? 8 : (r.IsTrunk() ? 25 : 10), !faultTested));
-                tested++;
-                if (r != null && r.IsTrunk() && tested == 1) yield return StartCoroutine(TestIsland(r));
-                if (r != null && r.IsTrunk() && tested == 1) TestPlantLeader(r);
-                if (quick) break;
+                int tested = 0, others = 0;
+                foreach (var r in roots)
+                {
+                    if (r == null) continue;
+                    if (!r.IsTrunk() && ++others > 2) break;
+                    yield return StartCoroutine(TestPlant(r, r.IsTrunk() ? "trunk" : "plant " + others, quick ? 8 : (r.IsTrunk() ? 25 : 10), !faultTested));
+                    tested++;
+                    if (r != null && r.IsTrunk() && tested == 1) yield return StartCoroutine(TestIsland(r));
+                    if (r != null && r.IsTrunk() && tested == 1) TestPlantLeader(r);
+                    if (quick) break;
+                }
+                Check("PLANT-SEND", "at least one plant was tested", tested > 0, tested + " plants");
             }
-            Check("PLANT-SEND", "at least one plant was tested", tested > 0, tested + " plants");
 
-            yield return StartCoroutine(TestCrystals());
-            yield return StartCoroutine(TestTeleporters());
-            yield return StartCoroutine(TestRemoteCopy());
-            yield return StartCoroutine(TestWatchdog());
-            yield return StartCoroutine(TestFuzz(roots));
-            try { CheckGuestIsolation(); } catch (Exception e) { Check("AUDIT-ERROR", "guest isolation checks ran", false, Describe(e)); }
+            if (On("world")) yield return StartCoroutine(TestCrystals());
+            if (On("world")) yield return StartCoroutine(TestPickups());
+            if (On("world")) yield return StartCoroutine(TestTeleporters());
+            if (On("clone,fx")) yield return StartCoroutine(TestRemoteCopy());
+            if (On("world")) yield return StartCoroutine(TestWatchdog());
+            if (On("net")) yield return StartCoroutine(TestFuzz(roots));
+            if (On("world")) try { CheckGuestIsolation(); } catch (Exception e) { Check("AUDIT-ERROR", "guest isolation checks ran", false, Describe(e)); }
             Finish();
         }
 
@@ -748,7 +974,8 @@ namespace CoopMod
                 int inPlaceBefore = SharedWorld.StatInPlaceFailed, failBefore = SharedWorld.StatApplyFailed, rebuiltBefore = SharedWorld.StatRebuilt;
                 byte[] msg = WithSender(mine[k], Friend);
                 if (!Try("PLANT-CONVERGE", label + ": apply update " + (k + 1) + "/" + mine.Count, delegate { SharedWorld.TestApply(msg); })) yield break;
-                yield return new WaitForSeconds(isLast ? 4f : 1f);
+                if (isLast) yield return StartCoroutine(WaitUntil(delegate { return SharedWorld.StatApplyFailed > failBefore || SharedWorld.PlantSignature(root) == sigFinal; }, 5f, 1f));   // was a fixed 4 s: done once the plant equals the sender's and stays so for 1 s
+                else yield return new WaitForSeconds(1f);
                 string after = Facts(root);
                 bool inPlaceFailed = SharedWorld.StatInPlaceFailed > inPlaceBefore;
                 bool applyFailed = SharedWorld.StatApplyFailed > failBefore;
@@ -775,7 +1002,7 @@ namespace CoopMod
                 byte[] msg = WithSender(mine[mine.Count - 1], Friend);
                 Try("PLANT-REBUILD", label + ": apply with the in-place update failing", delegate { SharedWorld.TestApply(msg); });
                 SharedWorld.TestFailInPlaceOnce = false;
-                yield return new WaitForSeconds(4f);
+                yield return StartCoroutine(WaitUntil(delegate { return SharedWorld.StatRebuilt == rebuiltBefore + 1 && SharedWorld.StatApplyFailed == failBefore && SharedWorld.PlantSignature(root) == sigFinal; }, 5f, 1f));   // was a fixed 4 s
                 int sigNow = SharedWorld.PlantSignature(root);
                 Check("PLANT-REBUILD", label + ": the rebuild path was used", SharedWorld.StatRebuilt == rebuiltBefore + 1 && SharedWorld.StatApplyFailed == failBefore, "rebuilt " + (SharedWorld.StatRebuilt - rebuiltBefore) + " time(s), failures " + (SharedWorld.StatApplyFailed - failBefore));
                 Check("PLANT-REBUILD", label + ": the rebuilt plant equals the sender's", sigNow == sigFinal, "sender: " + factsFinal + " | receiver: " + Facts(root) + " | " + Diff(partsFinal, ObjectNames(root)));
@@ -793,7 +1020,7 @@ namespace CoopMod
                 Check("PLANT-DEFER", label + ": the update waits while I stand on the plant", held, "before " + oldSig + ", now " + SharedWorld.PlantSignature(root) + ", unchanged " + (SharedWorld.PlantSignature(root) == oldSig) + ", waiting: " + SharedWorld.TestWaiting);
                 SharedWorld.TestPlayerOnPlant = false;
                 SharedWorld.TestApplyWaiting();
-                yield return new WaitForSeconds(4f);
+                yield return StartCoroutine(WaitUntil(delegate { return SharedWorld.PlantSignature(root) == sigFinal && SharedWorld.TestWaiting == 0; }, 5f, 1f));   // was a fixed 4 s
                 Check("PLANT-DEFER", label + ": once I step off, the waiting update lands and the plant equals the sender's", SharedWorld.PlantSignature(root) == sigFinal && SharedWorld.TestWaiting == 0, "sender: " + factsFinal + " | receiver: " + Facts(root) + " | " + Diff(partsFinal, ObjectNames(root)));
                 SharedWorld.TestPlayerOnPlant = null;
             }
@@ -812,7 +1039,7 @@ namespace CoopMod
             yield return new WaitForSeconds(7f);   // friend's ownership runs out
             int resumeBefore = MessagesFor(id).Count;
             Try("PLANT-OWNER", label + ": local pull after hold", delegate { Stimulate(root); });
-            yield return new WaitForSeconds(6f);
+            yield return StartCoroutine(WaitUntil(delegate { return MessagesFor(id).Count > resumeBefore; }, 6.5f, 0f));   // was a fixed 6 s: done as soon as I send again
             Check("PLANT-OWNER", label + ": sends again after the friend is done", MessagesFor(id).Count > resumeBefore, (MessagesFor(id).Count - resumeBefore) + " messages");
         }
 
@@ -1584,13 +1811,14 @@ namespace CoopMod
         {
             string file = Path.Combine(Path.GetTempPath(), "coop-watchdog-test-" + Guid.NewGuid().ToString("N").Substring(0, 8) + ".log");
             var dog = new Watchdog(file, 1000); dog.Start();
-            for (int i = 0; i < 12; i++) { dog.Beat(); yield return new WaitForSeconds(0.1f); }
+            for (int i = 0; i < 12; i++) { dog.Beat(); yield return new WaitForSeconds(0.1f); }     // fixed on purpose: proves nothing is written while frames run
             string quiet = File.Exists(file) ? File.ReadAllText(file) : "";
             Check("WATCHDOG", "a game that keeps running frames writes nothing", quiet.Length == 0, quiet.Trim());
-            yield return new WaitForSeconds(2.2f);                      // no beats: the test's own "game" has frozen
+            yield return StartCoroutine(WaitUntil(delegate { return ReadShared(file).Contains("has not run a frame"); }, 3f, 0f));   // no beats: the test's own "game" has frozen (was a fixed 2.2 s)
             string frozen = File.Exists(file) ? File.ReadAllText(file) : "";
             Check("WATCHDOG", "a game that stops running frames is reported", frozen.Contains("has not run a frame"), frozen.Trim());
-            dog.Beat(); yield return new WaitForSeconds(0.8f);
+            dog.Beat();
+            yield return StartCoroutine(WaitUntil(delegate { return ReadShared(file).Contains("running again"); }, 1.5f, 0f));   // was a fixed 0.8 s
             string back = File.Exists(file) ? File.ReadAllText(file) : "";
             Check("WATCHDOG", "the recovery is reported too", back.Contains("running again"), back.Trim());
             dog.Stop();
@@ -1613,20 +1841,35 @@ namespace CoopMod
             host.TestSpawnCopy(peer, branch.transform.position + Vector3.right * 1.5f);
             if (peer.Clone == null || peer.Driver == null) { Check("REMOTE-NO-GRAB", "a copy of another player can be made for the test", false, "no copy"); yield break; }
             peer.Driver.useKeyboard = false;
-            peer.Driver.input.leftGrab = true; peer.Driver.input.rightGrab = true;
-            var hands = peer.Driver.GetComponent<BipedHandsScript>();
-            bool grabbed = false;
-            for (int i = 0; i < 30; i++)
+            if (On("clone"))
             {
-                yield return new WaitForSeconds(0.1f);
-                if (hands == null) break;
-                for (int h = 0; h < 2; h++) if (hands.hand[h].grabbing || hands.hand[h].grabbedObject != null) grabbed = true;
+                peer.Driver.input.leftGrab = true; peer.Driver.input.rightGrab = true;
+                var hands = peer.Driver.GetComponent<BipedHandsScript>();
+                bool grabbed = false;
+                for (int i = 0; i < 30; i++)
+                {
+                    yield return new WaitForSeconds(0.1f);     // fixed on purpose: it proves that nothing is grabbed during the whole 3 s
+                    if (hands == null) break;
+                    for (int h = 0; h < 2; h++) if (hands.hand[h].grabbing || hands.hand[h].grabbedObject != null) grabbed = true;
+                }
+                Check("REMOTE-NO-GRAB", "a copy told to grab never grabs anything in my world", hands != null && !grabbed, hands == null ? "no hands on the copy" : (grabbed ? "a hand grabbed something" : "no hand grabbed"));
+                Check("CLONE-NO-JETPACK", "a copy of another player has no jetpack of its own (it would talk to my fuel meter)", peer.Clone.GetComponentsInChildren<JetPack>(true).Length == 0, peer.Clone.GetComponentsInChildren<JetPack>(true).Length + " found");
+                peer.Driver.input.leftGrab = false; peer.Driver.input.rightGrab = false;
             }
-            Check("REMOTE-NO-GRAB", "a copy told to grab never grabs anything in my world", hands != null && !grabbed, hands == null ? "no hands on the copy" : (grabbed ? "a hand grabbed something" : "no hand grabbed"));
-            Check("CLONE-NO-JETPACK", "a copy of another player has no jetpack of its own (it would talk to my fuel meter)", peer.Clone.GetComponentsInChildren<JetPack>(true).Length == 0, peer.Clone.GetComponentsInChildren<JetPack>(true).Length + " found");
-            peer.Driver.input.leftGrab = false; peer.Driver.input.rightGrab = false;
+            else yield return new WaitForSeconds(3f);     // the copy gets the same 3 s to settle as when the grab test runs first
+            if (On("fx")) yield return StartCoroutine(TestCloneFx(peer));
+            yield return StartCoroutine(TestCloneIsolation(peer));     // tagged clone,fx: the voice/landing/death events (NET-FX-EVENT) are played on the copy here
+            var guard = peer.Clone != null ? peer.Clone.GetComponent<CloneGuard>() : null;
+            var swappers = guard != null ? guard.swappers : new SkinSwapper[0];
+            int queued = CloneGuard.OnLoadQueueCount(swappers);
+            bool hadGuard = guard != null;      // read before the copy goes: a destroyed guard compares equal to null
             Destroy(peer.Clone);
             peer.ClearClone();
+            yield return null; yield return null;
+            if (!On("clone")) yield break;
+            int left = CloneGuard.OnLoadQueueCount(swappers);
+            if (queued == 0) Note("CLONE-SCRIPTS: the copy's skin script had no callback in the load queue to leave behind (" + swappers.Length + " skin scripts)");
+            Check("CLONE-SCRIPTS", "a removed copy leaves no skin callback of its own in the game's load queue", hadGuard && left == 0, queued + " before, " + left + " after removal");
 
             Rigidbody part = null;
             foreach (Rigidbody rb in UnityEngine.Object.FindObjectsOfType(typeof(Rigidbody)))
@@ -1638,6 +1881,472 @@ namespace CoopMod
             yield return new WaitForFixedUpdate();
             float moved = (part.position - start).magnitude;
             Check("PLANT-PART-STEER", "a friend's held-object packet never moves a plant part (the plant is synced by its own updates only)", moved < 0.05f, "moved " + moved.ToString("F2") + " m");
+        }
+
+        static bool AllEmitting(ParticleSystem[] list, bool on)
+        {
+            foreach (var ps in list) if (ps != null && ps.enableEmission != on) return false;
+            return true;
+        }
+
+        static int HoldersOn(GameObject clone)
+        {
+            int n = 0;
+            foreach (var t in clone.GetComponentsInChildren<Transform>(true)) if (t.name == RemoteFx.HolderName) n++;
+            return n;
+        }
+
+        static bool HasAcc(string name) { try { return Singleton<SceneProfile>.Exists && SceneProfile.HasAccomplishment(name); } catch (Exception) { return false; } }
+        static int DeathCount() { return Singleton<PlayerAnalytics>.Exists ? Singleton<PlayerAnalytics>.Instance.m_deathExplodedCount + Singleton<PlayerAnalytics>.Instance.m_deathDrownedCount : -1; }
+        static string Dist(GameObject g, Vector3 p) { return g == null ? "none" : (g.transform.position - p).magnitude.ToString("F2") + " m"; }
+
+        // A Collision as the physics engine hands it over, with only its speed filled in (for BipedWalkScript.HandleCollision).
+        static Collision FakeCollision(Vector3 relativeVelocity)
+        {
+            try
+            {
+                var c = (Collision)Activator.CreateInstance(typeof(Collision), true);
+                var f = typeof(Collision).GetField("m_RelativeVelocity", BindingFlags.NonPublic | BindingFlags.Instance);
+                if (f == null) return null;
+                f.SetValue(c, relativeVelocity);
+                return (c.relativeVelocity - relativeVelocity).magnitude < 0.01f ? c : null;
+            }
+            catch (Exception) { return null; }
+        }
+
+        PlayerState FxPacket(uint seq, Vector3 pos, params FxEvent[] events)
+        {
+            var s = new PlayerState { seq = seq, pos = pos, camForward = Vector3.forward, events = events };
+            return PlayerState.Read(s.Write());   // the real wire format, both ways
+        }
+
+        // The friend's copy runs a copy of MY walkster's scripts. None of them may reach my BUD, my HUD, my save, my input or my voice, and
+        // what happens to the friend (their voice, a hard landing, a death) shows on their copy.
+        IEnumerator TestCloneIsolation(Peer peer)
+        {
+            var croot = peer.Clone; var d = peer.Driver; var fx = peer.Fx;
+            var me = GameObject.Find("Walkster");
+            var cw = d != null ? d.GetComponent<BipedWalkScript>() : null;
+            if (croot == null || d == null || cw == null || me == null) { Check("CLONE-SCRIPTS", "a copy and my walkster exist to test with", false, "copy=" + (croot != null) + " walker=" + (cw != null) + " me=" + (me != null)); yield break; }
+
+            // ---- which scripts the copy still runs
+            string[] deny = { "WaterDeath", "IdleVocalisation", "HintBase", "HintManager", "FallToDeath", "PlayerOutOfBounds", "JetPack", "Flyable", "FreeFallControl", "CameraFocus",
+                              "DroneCameraAbility", "CrystalLocatorAbility", "LandWatch", "ExploreInputHandler", "TwoAxisXInput", "SaveInfo", "JumpAbility", "WaterWadeSound" };
+            var kinds = new Dictionary<string, int>(); var bad = new List<string>();
+            foreach (var mb in croot.GetComponentsInChildren<MonoBehaviour>(true))
+            {
+                if (mb == null) continue;
+                string n = mb.GetType().Name; int k; kinds.TryGetValue(n, out k); kinds[n] = k + 1;
+                for (Type t = mb.GetType(); t != null && t != typeof(MonoBehaviour); t = t.BaseType)
+                    if (Array.IndexOf(deny, t.Name) >= 0 || (t.IsGenericType && t.GetGenericTypeDefinition() == typeof(Singleton<>))) { if (!bad.Contains(n)) bad.Add(n); break; }
+            }
+            var names = new List<string>(); foreach (var kv in kinds) names.Add(kv.Key + (kv.Value > 1 ? " x" + kv.Value : ""));
+            names.Sort();
+            Note("CLONE-SCRIPTS: the copy runs " + string.Join(", ", names.ToArray()));
+            Check("CLONE-SCRIPTS", "a copy has none of the game's scripts that reach my walkster, HUD, save, input, camera or voice", bad.Count == 0, bad.Count == 0 ? kinds.Count + " kinds of script, none on the deny list" : "still there: " + string.Join(", ", bad.ToArray()));
+            Check("CLONE-SCRIPTS", "a copy has its guard (kept from the chunker, its skin callback removed with it)", croot.GetComponent<CloneGuard>() != null, "");
+
+            // ---- a hard bump
+            Check("CLONE-IMMORTAL", "the copy's walker is immortal, so a hard bump cannot knock it out", cw.m_immortal, "m_immortal=" + cw.m_immortal);
+            cw.m_immortal = false; yield return null; yield return null;
+            Check("CLONE-IMMORTAL", "the copy's driver makes it immortal again at once (a ram attack clears it)", cw.m_immortal, "m_immortal=" + cw.m_immortal);
+            var myVoice = VoiceWatch.MyVoice(me);
+            var hc = typeof(BipedWalkScript).GetMethod("HandleCollision", BindingFlags.NonPublic | BindingFlags.Instance);
+            var bump = FakeCollision(new Vector3(0f, -30f, 0f));
+            bool died0 = HasAcc("PlayerDied"); int deaths0 = DeathCount();
+            if (hc == null || bump == null) Check("CLONE-IMMORTAL", "a fake hard bump can be made for the test", false, "HandleCollision=" + (hc != null) + " collision=" + (bump != null));
+            else
+            {
+                if (myVoice != null) myVoice.Play("Voice.Jump", false);
+                bool talking = myVoice != null && myVoice.isPlaying;
+                hc.Invoke(cw, new object[] { bump });
+                bool stillTalking = myVoice != null && myVoice.isPlaying;
+                Check("CLONE-IMMORTAL", "a 30 m/s bump of the copy does not knock it out, cut my voice or count a death of mine",
+                    cw.enabled && HasAcc("PlayerDied") == died0 && DeathCount() == deaths0 && stillTalking == talking,
+                    "walker on=" + cw.enabled + ", my deaths " + deaths0 + " -> " + DeathCount() + ", PlayerDied " + died0 + " -> " + HasAcc("PlayerDied") + ", my voice " + talking + " -> " + stillTalking);
+                if (myVoice != null) myVoice.Stop();
+            }
+
+            // ---- a jump
+            if (myVoice == null || d.Voice == null) Check("CLONE-VOICE", "my walkster and the copy each have a voice source", false, "mine=" + (myVoice != null) + " copy=" + (d.Voice != null));
+            else
+            {
+                myVoice.Stop(); d.Voice.Stop();
+                object voiceBefore = JumpWindow.VoiceField != null ? JumpWindow.VoiceField.GetValue(null) : null;
+                var leaf0 = BipedWalkScript.m_OnBigLeafJumpDelegate; var ach0 = SceneProfile.m_OnNewAccomplishment;
+                var mirror = d.mirrorFrom; d.mirrorFrom = null; cw.jumpEnabled = true; d.wakeForTest = true;
+                int closed0 = JumpWindow.Closed;
+                d.QueueJumpForTest();
+                for (int i = 0; i < 25 && JumpWindow.Closed == closed0; i++) yield return new WaitForFixedUpdate();
+                bool closed = JumpWindow.Closed > closed0;
+                bool mineSaid = VoiceNames.Is(myVoice, "Voice.Jump", "Voice.BouncyLeafJump");
+                bool copySaid = VoiceNames.Is(d.Voice, "Voice.Jump", "Voice.BouncyLeafJump");
+                string clips = "my voice " + (myVoice.isPlaying ? VoiceNames.PathOf(myVoice.clip) ?? "?" : "silent") + ", copy's voice " + (d.Voice.isPlaying ? VoiceNames.PathOf(d.Voice.clip) ?? "?" : "silent");
+                Check("CLONE-VOICE", "a friend's jump never plays a jump line from my BUD", closed && !mineSaid, (closed ? "" : "the jump step never ran; ") + clips);
+                Check("CLONE-VOICE", "the friend's jump line plays from their copy's own voice", closed && d.LastJumpUsed && copySaid, "jump used=" + d.LastJumpUsed + ", " + clips);
+                object voiceAfter = JumpWindow.VoiceField != null ? JumpWindow.VoiceField.GetValue(null) : null;
+                Check("CLONE-VOICE-RESTORE", "after the copy's jump step the game's voice is mine again and its leaf-jump and achievement hooks are back",
+                    closed && JumpWindow.VoiceField != null && object.ReferenceEquals(voiceAfter, voiceBefore) && Equals(BipedWalkScript.m_OnBigLeafJumpDelegate, leaf0) && Equals(SceneProfile.m_OnNewAccomplishment, ach0) && JumpWindow.Owner == null && !cw.m_TriggerJump,
+                    "voice field found=" + (JumpWindow.VoiceField != null) + ", voice same=" + object.ReferenceEquals(voiceAfter, voiceBefore) + ", leaf hook same=" + Equals(BipedWalkScript.m_OnBigLeafJumpDelegate, leaf0) + ", achievement hook same=" + Equals(SceneProfile.m_OnNewAccomplishment, ach0) + ", jump flag left=" + cw.m_TriggerJump);
+                d.wakeForTest = false; d.mirrorFrom = mirror;
+                d.Voice.Stop(); myVoice.Stop();
+
+                // what a leaf jump does inside that step, done by hand inside a real window: the achievement, the foley on my body, the rumble
+                if (HasAcc("bouncedoffleaf")) Note("CLONE-VOICE-RESTORE: this save already has the leaf achievement; the take-back check is skipped");
+                else if (!Singleton<SceneProfile>.Exists) Note("CLONE-VOICE-RESTORE: no scene profile; the take-back check is skipped");
+                else
+                {
+                    int heard = 0; var orig = SceneProfile.m_OnNewAccomplishment;
+                    SceneProfile.StringDelegate spy = n => { if (n == "bouncedoffleaf") heard++; };
+                    SceneProfile.m_OnNewAccomplishment = (SceneProfile.StringDelegate)Delegate.Combine(orig, spy);
+                    var myBody = me.GetComponentInChildren<BipedWalkScript>().gameObject;
+                    bool opened = JumpWindow.Open(d, d.Voice, cw);
+                    AudioSource foley = null;
+                    if (opened)
+                    {
+                        SceneProfile.AddAccomplishment("bouncedoffleaf");
+                        if (Singleton<TempSourceManager>.Exists) foley = Singleton<TempSourceManager>.Instance.PlayClipOnObject(myBody, "Toys.BouncyLeaf");
+                        cw.m_stopAirPlayTime = Time.time + 4f;          // what the game's leaf jump sets
+                        JumpWindow.Close();
+                    }
+                    SceneProfile.m_OnNewAccomplishment = orig;
+                    Check("CLONE-VOICE-RESTORE", "the leaf achievement a copy's jump adds to my save is taken back, and nothing of mine hears of it", opened && !HasAcc("bouncedoffleaf") && heard == 0 && JumpWindow.BounceTakenBack,
+                        "opened=" + opened + ", still in my save=" + HasAcc("bouncedoffleaf") + ", heard by my hooks " + heard + " times");
+                    var on = JumpWindow.LinkedTo(foley);
+                    Check("CLONE-VOICE-RESTORE", "a copy's leaf-jump sound follows the copy, not me, and my pad's rumble is cut", foley == null || (on == cw.gameObject && JumpWindow.MuteRumbleUntil > Time.time),
+                        foley == null ? "no pooled sound to look at" : "sound follows " + (on == null ? "nothing" : on == cw.gameObject ? "the copy" : on == myBody ? "MY BUD" : on.name) + ", rumble cut " + (JumpWindow.MuteRumbleUntil - Time.time).ToString("F2") + " s more");
+                    if (foley != null) foley.Stop();
+                    cw.m_stopAirPlayTime = 0f;
+
+                    // we both jump off big leaves in the same step: my own achievement, leaf hook, sound and rumble stay mine
+                    var mw = me.GetComponentInChildren<BipedWalkScript>();
+                    GameObject leafStub = null; string stubErr = "";
+                    try { leafStub = new GameObject("CoopTestLeaf"); leafStub.tag = "bounce"; } catch (Exception e) { stubErr = Describe(e); }
+                    if (leafStub == null || leafStub.tag != "bounce") Check("CLONE-VOICE-RESTORE", "a stand-in big leaf can be made for the both-jump test", false, stubErr);
+                    else
+                    {
+                        int heard2 = 0, leafCalls = 0;
+                        var leafOrig = BipedWalkScript.m_OnBigLeafJumpDelegate;
+                        BipedWalkScript.m_OnBigLeafJumpDelegate = () => leafCalls++;
+                        SceneProfile.StringDelegate spy2 = n => { if (n == "bouncedoffleaf") heard2++; };
+                        SceneProfile.m_OnNewAccomplishment = spy2;   // only the spy: the game's real hooks (Steam) must not hear a test achievement
+                        float myAir = mw.m_stopAirPlayTime; var myStood = mw.m_objectStoodOn;
+                        JumpWindow.MuteRumbleUntil = -1f;
+                        AudioSource f1 = null, f2 = null;
+                        bool opened2 = JumpWindow.Open(d, d.Voice, cw);
+                        if (opened2)
+                        {
+                            // what both walkers' leaf jumps do in that step (each one adds the achievement, each sound goes on my body)
+                            SceneProfile.AddAccomplishment("bouncedoffleaf");
+                            SceneProfile.AddAccomplishment("bouncedoffleaf");
+                            if (Singleton<TempSourceManager>.Exists) { f1 = Singleton<TempSourceManager>.Instance.PlayClipOnObject(myBody, "Toys.BouncyLeaf"); f2 = Singleton<TempSourceManager>.Instance.PlayClipOnObject(myBody, "Toys.BouncyLeaf"); }
+                            cw.m_stopAirPlayTime = Time.time + 4f;
+                            mw.m_stopAirPlayTime = Time.time + 4f; mw.m_objectStoodOn = leafStub.transform;
+                            JumpWindow.Close();
+                        }
+                        mw.m_stopAirPlayTime = myAir; mw.m_objectStoodOn = myStood; cw.m_stopAirPlayTime = 0f;
+                        SceneProfile.m_OnNewAccomplishment = orig;
+                        BipedWalkScript.m_OnBigLeafJumpDelegate = leafOrig;
+                        bool kept = HasAcc("bouncedoffleaf");
+                        Check("CLONE-VOICE-RESTORE", "my own leaf jump in the copy's step keeps my achievement, and my hooks hear it once",
+                            opened2 && JumpWindow.MineLeafJumped && kept && !JumpWindow.BounceTakenBack && heard2 == 1 && leafCalls == 1,
+                            "opened=" + opened2 + ", mine seen=" + JumpWindow.MineLeafJumped + ", kept=" + kept + ", heard " + heard2 + ", leaf hook called " + leafCalls);
+                        var o1 = JumpWindow.LinkedTo(f1); var o2 = JumpWindow.LinkedTo(f2);
+                        int onMe = (o1 == myBody ? 1 : 0) + (o2 == myBody ? 1 : 0), onCopy = (o1 == cw.gameObject ? 1 : 0) + (o2 == cw.gameObject ? 1 : 0);
+                        Check("CLONE-VOICE-RESTORE", "with both leaf jumps one sound stays on me, one goes to the copy, and my pad keeps its rumble",
+                            (f1 == null && f2 == null && JumpWindow.MuteRumbleUntil < Time.time) || (onMe == 1 && onCopy == 1 && JumpWindow.MuteRumbleUntil < Time.time),
+                            f1 == null ? "no pooled sound to look at" : onMe + " on me, " + onCopy + " on the copy, rumble cut " + (JumpWindow.MuteRumbleUntil > Time.time));
+                        if (f1 != null) f1.Stop(); if (f2 != null) f2.Stop();
+                        if (kept) { try { SceneProfile.RemoveAccomplishment("bouncedoffleaf"); } catch (Exception) { } }   // the save had none before this test
+                    }
+                    if (leafStub != null) Destroy(leafStub);
+                }
+            }
+
+            // ---- their own voice lines, from their packets
+            if (myVoice != null && d.Voice != null && fx != null)
+            {
+                peer.FxIdKnown = false;
+                myVoice.Stop(); d.Voice.Stop();
+                var vs = FxPacket(901, cw.body.position, new FxEvent { id = 500, kind = FxEvent.Voice, voice = "Voice.Jump" });
+                int n1 = vs != null ? CoopBehaviour.ApplyFxEvents(peer, vs) : -1;
+                Check("NET-FX-EVENT", "a friend's voice line from their packet plays from their copy, never from my BUD", n1 == 1 && VoiceNames.Is(d.Voice, "Voice.Jump") && !VoiceNames.Is(myVoice, "Voice.Jump"),
+                    "shown " + n1 + ", copy says " + (d.Voice.isPlaying ? VoiceNames.PathOf(d.Voice.clip) : "nothing") + ", I say " + (myVoice.isPlaying ? VoiceNames.PathOf(myVoice.clip) : "nothing"));
+                int n2 = vs != null ? CoopBehaviour.ApplyFxEvents(peer, vs) : -1;
+                Check("NET-FX-EVENT", "the same event in the next packet is not played again", n2 == 0, "shown " + n2);
+                d.Voice.Stop();
+
+                // my own lines are announced for the others
+                FxOutbox.Clear();
+                VoiceWatch.Poll(me);
+                myVoice.Play("Voice.Jump", false);
+                VoiceWatch.Poll(me);
+                var last = FxOutbox.Last;
+                Check("NET-FX-EVENT", "a voice line of mine is announced once, by its sound event name", last != null && last.kind == FxEvent.Voice && last.voice == "Voice.Jump" && FxOutbox.Current().Length == 1,
+                    last == null ? "nothing announced" : "kind " + last.kind + " " + last.voice + ", " + FxOutbox.Current().Length + " waiting");
+                myVoice.Stop(); VoiceWatch.Poll(me); FxOutbox.Clear();
+            }
+            else Check("NET-FX-EVENT", "voice sources and the copy's effects part exist for the voice relay test", false, "mine=" + (myVoice != null) + " copy=" + (d.Voice != null) + " fx=" + (fx != null));
+
+            // ---- a hard landing of theirs: dust and grunt at the copy
+            if (fx != null)
+            {
+                RaycastHit hit;
+                bool ground = Physics.Raycast(cw.body.position + Vector3.up * 2f, Vector3.down, out hit, 25f, 1 << LayerMask.NameToLayer("Terrain"));
+                Vector3 senderAt = cw.body.position;
+                Vector3 spot = ground ? hit.point : cw.body.position - Vector3.up;
+                var ls = FxPacket(902, senderAt, new FxEvent { id = 501, kind = FxEvent.Grunt, point = spot, normal = ground ? hit.normal : Vector3.up });
+                int n = ls != null ? CoopBehaviour.ApplyFxEvents(peer, ls) : -1;
+                Vector3 mine = me.GetComponentInChildren<BipedWalkScript>().body.position;
+                Check("NET-FX-EVENT", "a friend's hard landing plays the grunt at their copy", n == 1 && fx.LastSound != null && (fx.LastSound.transform.position - cw.body.position).magnitude < 1f,
+                    "shown " + n + ", sound " + Dist(fx.LastSound, cw.body.position) + " from the copy, " + Dist(fx.LastSound, mine) + " from me");
+                if (!ground) Note("NET-FX-EVENT: no ground right under the copy; the dust check is skipped");
+                else Check("NET-FX-EVENT", "a friend's hard landing raises the ground's dust where their copy landed, none at me", fx.LastParticle != null && (fx.LastParticle.transform.position - spot).magnitude < 0.5f,
+                    "dust " + Dist(fx.LastParticle, spot) + " from the landing spot, " + Dist(fx.LastParticle, mine) + " from me");
+                if (fx.LastParticle != null) Destroy(fx.LastParticle);
+            }
+            else Check("NET-FX-EVENT", "the copy has its effects part for the landing test", false, "no fx");
+
+            // ---- my own landings are announced the way the game measures them
+            var lw = LandWatch.Ensure(me);
+            if (lw == null || lw.ftd == null || LandWatch.KillField == null || LandWatch.GruntField == null || LandWatch.VelField == null)
+                Check("NET-FX-EVENT", "my walkster's fall script can be read for landing energy", false, "watch=" + (lw != null) + " fields=" + (LandWatch.KillField != null) + "/" + (LandWatch.GruntField != null) + "/" + (LandWatch.VelField != null));
+            else
+            {
+                float kill = (float)LandWatch.KillField.GetValue(lw.ftd), grunt = (float)LandWatch.GruntField.GetValue(lw.ftd);
+                var body = lw.rigidbody; float mass = body != null ? body.mass : 100f;
+                Func<float, Vector3> fall = e => Vector3.down * Mathf.Sqrt(2f * e / mass);   // straight down onto flat ground: the whole speed counts
+                var at = new[] { lw.transform.position - Vector3.up }; var up = new[] { Vector3.up };
+                FxOutbox.Clear();
+                byte soft = lw.Hit(mass, fall(grunt * 0.5f), at, up);
+                byte hard = lw.Hit(mass, fall((grunt + kill) * 0.5f), at, up);
+                var ev = FxOutbox.Last;
+                yield return StartCoroutine(WaitReal(0.35f));
+                byte deadly = lw.Hit(mass, fall(kill * 1.5f), at, up);
+                Check("NET-FX-EVENT", "my landings are announced as the game measures them: a soft one never, a hard one as a grunt, a deadly one as deadly", soft == 0 && hard == FxEvent.Grunt && deadly == FxEvent.Lethal && ev != null && (ev.point - at[0]).magnitude < 0.01f,
+                    "soft " + soft + ", hard " + hard + ", deadly " + deadly + " (grunt from " + grunt.ToString("F0") + ", kill from " + kill.ToString("F0") + ")");
+
+                // my death: the game switches my walkster off in the same step, so the death and the deadly landing go out on my last pose
+                lw.AnnounceDeath();
+                var dead = FxOutbox.Last;
+                var lastPose = new PlayerState { seq = 70, pos = lw.transform.position, camForward = Vector3.forward, move = Vector2.one, skin = 3, jumpScale = 1f };
+                var gone = CoopBehaviour.PoseWhileGone(lastPose, 71, FxOutbox.Current());
+                var goneBack = gone != null ? PlayerState.Read(gone.Write()) : null;
+                bool hasDeath = false, hasLethal = false;
+                if (goneBack != null) foreach (var e in goneBack.events) { if (e.kind == FxEvent.Death) hasDeath = true; if (e.kind == FxEvent.Lethal) hasLethal = true; }
+                bool nothingToSay = CoopBehaviour.PoseWhileGone(lastPose, 72, new FxEvent[0]) == null;
+                Check("NET-FX-EVENT", "my death (and the deadly landing) still goes out while my walkster is switched off, on my last pose standing still",
+                    dead != null && dead.kind == FxEvent.Death && hasDeath && hasLethal && goneBack.seq == 71 && (goneBack.pos - lastPose.pos).magnitude < 0.01f && goneBack.move == Vector2.zero && goneBack.skin == 3 && nothingToSay,
+                    "announced=" + (dead != null ? dead.kind.ToString() : "nothing") + ", packet=" + (goneBack == null ? "none" : goneBack.events.Length + " events, death=" + hasDeath + ", deadly landing=" + hasLethal) + ", empty when nothing waits=" + nothingToSay);
+                FxOutbox.Clear();
+            }
+
+            // ---- their death: explosion at the copy, the copy hides and comes back when they respawn
+            if (fx != null)
+            {
+                bool died1 = HasAcc("PlayerDied"); int deaths1 = DeathCount();
+                // they die with the jetpack firing: its looping roar must stop with the copy, not play on at the death spot
+                fx.Set(true, 0, Vector3.zero, Quaternion.identity, 0, 0, Time.time);
+                yield return null;
+                bool roaring = fx.ThrustForTest != null;
+                var ds = FxPacket(903, cw.body.position, new FxEvent { id = 502, kind = FxEvent.Death, cause = FxEvent.CauseImpact });
+                int n = ds != null ? CoopBehaviour.ApplyFxEvents(peer, ds) : -1;
+                bool hidden = !croot.activeSelf;
+                fx.Set(false, 0, Vector3.zero, Quaternion.identity, 0, 0, -999f);
+                if (!Singleton<TempSourceManager>.Exists) Note("NET-FX-EVENT: no sound pool; the jetpack-sound-on-death check is skipped");
+                else Check("NET-FX-EVENT", "a copy hidden for its player's death stops its jetpack roar and flame and leaf sound", roaring && hidden && fx.ThrustForTest == null && fx.GlideForTest == null && !fx.FlameOn,
+                    "was roaring=" + roaring + ", hidden=" + hidden + ", roar left=" + (fx.ThrustForTest != null) + ", glide left=" + (fx.GlideForTest != null) + ", flame=" + fx.FlameOn);
+                Check("NET-FX-EVENT", "a friend's death blows up their copy (the game's chunks and sound) and hides it; nothing of mine dies", n == 1 && hidden && fx.LastChunks > 0 && fx.LastSound != null && me.activeInHierarchy && HasAcc("PlayerDied") == died1 && DeathCount() == deaths1,
+                    "shown " + n + ", hidden=" + hidden + ", " + fx.LastChunks + " chunks, my deaths " + deaths1 + " -> " + DeathCount());
+                yield return new WaitForSeconds(0.5f);
+                Check("NET-FX-EVENT", "the copy stays hidden while they are still dead where they fell", !croot.activeSelf, "active=" + croot.activeSelf);
+                d.hasNet = true; d.netPos = cw.body.position + Vector3.right * 20f; d.netVel = Vector3.zero; d.netTime = Time.time;   // they respawned elsewhere
+                yield return new WaitForSeconds(CloneGuard.DeathShowAfter);
+                yield return null;
+                var drv = croot.GetComponentInChildren<RemoteDriver>();
+                Check("NET-FX-EVENT", "the copy comes back, working, once they respawn somewhere else", croot.activeSelf && drv != null && drv.enabled, "active=" + croot.activeSelf + " driver=" + (drv != null));
+                yield return null;
+                d.hasNet = false;
+            }
+
+            // ---- the game's own killers (venus trap, ram, drowning...) turn whatever they catch to chunks
+            if (!Singleton<Chunker>.Exists) Check("CLONE-NO-CHUNK", "the game's chunker exists to test with", false, "none");
+            else
+            {
+                var g = croot.GetComponent<CloneGuard>(); int blocked0 = g != null ? g.Blocked : -1;
+                Transform[] parts = null; string err = "";
+                try { parts = Chunker.TurnToChunks(croot, 0f); } catch (Exception e) { err = Describe(e); }
+                yield return null; yield return null;
+                var drv = croot != null ? croot.GetComponentInChildren<RemoteDriver>() : null;
+                var walk = croot != null ? croot.GetComponentInChildren<BipedWalkScript>() : null;
+                Check("CLONE-NO-CHUNK", "the game's chunker cannot destroy a copy: it stays, keeps its driver and walker and is back on 2 frames later",
+                    parts == null && err.Length == 0 && croot != null && croot.activeSelf && drv != null && walk != null && g != null && g.Blocked == blocked0 + 1 && peer.Driver == drv,
+                    (err.Length > 0 ? err + "; " : "") + "chunks=" + (parts != null ? parts.Length : 0) + " active=" + (croot != null && croot.activeSelf) + " driver=" + (drv != null) + " walker=" + (walk != null) + " blocked=" + (g != null ? g.Blocked - blocked0 : -1));
+            }
+        }
+
+        // A friend's jetpack flame and flower/leaf show on their copy, as looks only: nothing of mine (fuel, flight time, flight lock, inventory, my own flower) changes.
+        IEnumerator TestCloneFx(Peer peer)
+        {
+            var croot = peer.Clone;
+            var me = GameObject.Find("Walkster");
+            int jpN = croot.GetComponentsInChildren<JetPack>(true).Length, flyN = croot.GetComponentsInChildren<Flyable>(true).Length, ffN = croot.GetComponentsInChildren<FreeFallControl>(true).Length;
+            Check("CLONE-FX", "a copy has no jetpack, flower/leaf or free-fall script of its own (they would use my controller, inventory and walkster)", jpN + flyN + ffN == 0, jpN + " jetpack, " + flyN + " flower/leaf, " + ffN + " free-fall");
+            var fx = peer.Fx;
+            Check("CLONE-FX", "a copy has the visual-only effects part", fx != null && croot.GetComponentInChildren<RemoteFx>() != null, fx == null ? "none" : "");
+            if (fx == null || me == null) yield break;
+
+            // jetpack flame
+            var myJets = me.GetComponentsInChildren<JetPack>(true);
+            if (myJets.Length == 0) Note("CLONE-FX: my walkster has no jetpack in this save; flame checks skipped");
+            else
+            {
+                bool named = false; foreach (var ps in fx.flames) if (ps != null && ps.name == "JetPackParticle") named = true;
+                Check("CLONE-FX", "the copy keeps its jetpack flame, switched off", fx.flames.Length > 0 && named && AllEmitting(fx.flames, false), fx.flames.Length + " flame parts, JetPackParticle among them=" + named);
+                var fuelField = typeof(JetPack).GetField("m_fuel", BindingFlags.NonPublic | BindingFlags.Instance);
+                float fuel0 = fuelField != null ? (float)fuelField.GetValue(myJets[0]) : 0f;
+                float time0 = Singleton<SceneProfile>.Exists ? SceneProfile.JetPackTime : 0f;
+                var lock0 = AerodynamicBehaviour.m_currentBehaviour;
+                for (int i = 0; i < 5; i++) { fx.Set(true, 0, Vector3.zero, Quaternion.identity, 0, 0, Time.time); yield return null; }
+                Check("CLONE-FX", "a friend's jetpack firing shows the flame on their copy", fx.FlameOn && fx.flames.Length > 0 && AllEmitting(fx.flames, true), "flame on=" + fx.FlameOn);
+                float fuel1 = fuelField != null ? (float)fuelField.GetValue(myJets[0]) : 0f;
+                float time1 = Singleton<SceneProfile>.Exists ? SceneProfile.JetPackTime : 0f;
+                Check("CLONE-FX", "a friend's flame uses none of my fuel, flight time or flight lock", fuel1 >= fuel0 - 0.0001f && time1 == time0 && AerodynamicBehaviour.m_currentBehaviour == lock0,
+                    "fuel " + fuel0.ToString("F3") + " -> " + fuel1.ToString("F3") + ", jetpack time " + time0.ToString("F2") + " -> " + time1.ToString("F2") + ", lock same=" + (AerodynamicBehaviour.m_currentBehaviour == lock0));
+                // flame on, then no packets at all: it must go out by itself
+                yield return StartCoroutine(WaitUntil(delegate { return !fx.FlameOn && AllEmitting(fx.flames, false); }, RemoteFx.Timeout + 0.5f, 0f));   // was a fixed Timeout + 0.2 s
+                Check("CLONE-FX", "a burning flame goes out by itself when the link goes quiet", !fx.FlameOn && AllEmitting(fx.flames, false), "flame on=" + fx.FlameOn);
+                for (int i = 0; i < 5; i++) { fx.Set(true, 0, Vector3.zero, Quaternion.identity, 0, 0, Time.time); yield return null; }
+                fx.Set(false, 0, Vector3.zero, Quaternion.identity, 0, 0, Time.time); yield return null; yield return null;
+                Check("CLONE-FX", "the flame goes out when they stop", !fx.FlameOn && AllEmitting(fx.flames, false), "flame on=" + fx.FlameOn);
+                fx.Set(true, 0, Vector3.zero, Quaternion.identity, 0, 0, Time.time - 1f); yield return null; yield return null;
+                Check("CLONE-FX", "a flame whose last news is a second old stays out (a lost link cannot leave it on)", !fx.FlameOn && AllEmitting(fx.flames, false), "flame on=" + fx.FlameOn);
+            }
+
+            // flower and leaf
+            var fm = Singleton<FlyableManager>.Exists ? Singleton<FlyableManager>.Instance : null;
+            var item0 = fm != null ? fm.m_pickupItem : FlyableManager.PickupItem.None;
+            bool deployed0 = Flyable.IsDeployed;
+            var myFlowers = me.GetComponentsInChildren<GlideParachute>(true);
+            var myFlower = myFlowers.Length > 0 ? myFlowers[0] : null;
+            bool open0 = myFlower != null && myFlower.ParachuteOpen;
+            foreach (byte kind in new byte[] { 2, 1 })
+            {
+                string what = kind == 1 ? "leaf" : "flower";
+                if ((kind == 1 ? fx.leafPrefab : fx.flowerPrefab) == null) { Note("CLONE-FX: the copy has no " + what + " model in this save; " + what + " checks skipped"); continue; }
+                var off = new Vector3(0.2f, 1.5f, 0.3f);
+                for (int i = 0; i < 3; i++) { fx.Set(false, kind, off, Quaternion.identity, 3, 0, Time.time); yield return null; }
+                var vis = fx.Visual;
+                int holders = HoldersOn(croot);
+                Check("CLONE-FX", "a friend's " + what + " shows on their copy, once", holders == 1 && vis != null && vis.activeInHierarchy, holders + " shown, visual=" + (vis != null));
+                int rbs = vis != null ? vis.GetComponentsInChildren<Rigidbody>(true).Length : -1, cols = vis != null ? vis.GetComponentsInChildren<Collider>(true).Length : -1, mbs = vis != null ? vis.GetComponentsInChildren<MonoBehaviour>(true).Length : -1;
+                Check("CLONE-FX", "the " + what + " on the copy is looks only: no rigidbody, collider or script", vis != null && rbs == 0 && cols == 0 && mbs == 0, rbs + " rigidbodies, " + cols + " colliders, " + mbs + " scripts");
+                float dist = vis != null && fx.body != null ? (vis.transform.position - (fx.body.position + off)).magnitude : -1f;
+                float allow = 0.1f + (fx.body != null ? fx.body.velocity.magnitude * 0.1f : 0f);   // the copy's body may still be settling
+                Check("CLONE-FX", "the " + what + " is where their packet puts it", dist >= 0f && dist <= allow, dist.ToString("F2") + " m off (allowed " + allow.ToString("F2") + ")");
+                if (kind == 2) Check("CLONE-FX", "the flower shows no more petals than they have left", vis != null && vis.transform.childCount <= 3, (vis != null ? vis.transform.childCount : -1) + " parts for 3 petals");
+                bool open1 = myFlower != null && myFlower.ParachuteOpen;
+                var item1 = fm != null ? fm.m_pickupItem : FlyableManager.PickupItem.None;
+                Check("CLONE-FX", "a friend's " + what + " changes nothing of mine (inventory, flight, my own flower)", item1 == item0 && Flyable.IsDeployed == deployed0 && open1 == open0, "inventory " + item0 + " -> " + item1 + ", deployed " + deployed0 + " -> " + Flyable.IsDeployed + ", my flower open " + open0 + " -> " + open1);
+                Note("CLONE-FX: " + RemoteFx.LastStrip);
+                // no packets at all: it must go away by itself
+                yield return StartCoroutine(WaitUntil(delegate { return HoldersOn(croot) == 0 && fx.Visual == null; }, RemoteFx.Timeout + 0.5f, 0f));   // was a fixed Timeout + 0.2 s
+                Check("CLONE-FX", "a friend's " + what + " goes away by itself when the link goes quiet", HoldersOn(croot) == 0 && fx.Visual == null, HoldersOn(croot) + " left");
+                for (int i = 0; i < 3; i++) { fx.Set(false, kind, off, Quaternion.identity, 3, 0, Time.time); yield return null; }
+                fx.Set(false, 0, Vector3.zero, Quaternion.identity, 0, 0, Time.time); yield return null; yield return null;
+                Check("CLONE-FX", "the " + what + " goes away when they put it away", HoldersOn(croot) == 0 && fx.Visual == null, HoldersOn(croot) + " left");
+            }
+
+            // a flower I had put away when the copy was made must not be on the copy (visibility mirroring could show it at a stale place)
+            var myStored = myFlower != null ? LocalFx.Get(LocalFx.Stored, myFlower) : null;
+            if (myStored == null) Note("CLONE-FX: I have no flower put away; the inherited-flower check has nothing to look at");
+            else
+            {
+                int found = 0;
+                foreach (Transform t in croot.transform) if (t.name == myStored.name) found++;
+                Check("CLONE-FX", "the copy has no copy of the flower I had put away", found == 0, found + " found");
+            }
+        }
+
+        // A flower or leaf a friend takes disappears here and grows back, never going into my inventory; mine is announced once; broken messages do nothing.
+        IEnumerator TestPickups()
+        {
+            var fm = Singleton<FlyableManager>.Exists ? Singleton<FlyableManager>.Instance : null;
+            var item0 = fm != null ? fm.m_pickupItem : FlyableManager.PickupItem.None;
+            var all = new List<ParachutePickup>();
+            foreach (ParachutePickup pk in UnityEngine.Object.FindObjectsOfType(typeof(ParachutePickup)))
+                if (pk != null && !pk.name.EndsWith(" Pickup") && pk.GetComponent<ShrinkAndDestroy>() == null && !pk.transform.root.name.StartsWith("Walkster")) all.Add(pk);
+            Note("---- flower/leaf pickups (" + all.Count + " in the world)");
+
+            Route r13 = MessageGate.Classify(new byte[13] { SharedWorld.MsgPickup, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, false);
+            var b15 = new byte[15]; b15[0] = SharedWorld.MsgPickup;
+            Route r15 = MessageGate.Classify(b15, false);
+            Check("PICKUP-SYNC", "pickup messages of the wrong length are refused at the gate", r13 == Route.Ignore && r15 == Route.Ignore, "13 bytes: " + r13 + ", 15 bytes: " + r15);
+
+            // a made-up spot far from any pickup changes nothing
+            int applied0 = SharedWorld.StatPickupsApplied;
+            sink.Messages.Clear();
+            SharedWorld.Handle(SharedWorld.TestPickupMessage(FlyableManager.PickupItem.Parachute, new Vector3(31000f, -9000f, 31000f)));
+            int rejected0 = SharedWorld.StatRejected;
+            SharedWorld.QuietRejects = true;
+            SharedWorld.Handle(new byte[] { SharedWorld.MsgPickup, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });    // no such pickup type
+            var nan = SharedWorld.TestPickupMessage(FlyableManager.PickupItem.Glider, Vector3.zero); Buffer.BlockCopy(BitConverter.GetBytes(float.NaN), 0, nan, 2, 4);
+            SharedWorld.Handle(nan);
+            SharedWorld.QuietRejects = false;
+            yield return null;
+            Check("PICKUP-SYNC", "a made-up or broken pickup message removes nothing", SharedWorld.StatPickupsApplied == applied0 && SharedWorld.StatRejected == rejected0 + 2, (SharedWorld.StatPickupsApplied - applied0) + " removed, " + (SharedWorld.StatRejected - rejected0) + " of 2 broken ones refused");
+
+            // my own take, the way the game reports it (a bare object: the game's own listeners only act on a falling leaf with a rigidbody)
+            var hooked = false;
+            var del = ParachutePickup.m_flyablePickedUpObjectDelegate;
+            if (del != null) foreach (var d in del.GetInvocationList()) if (d.Method.DeclaringType == typeof(SharedWorld)) hooked = true;
+            var fake = new GameObject("CoopTest Flower");
+            var dropped = new GameObject("CoopTest Leaf Pickup");
+            sink.Messages.Clear();
+            bool ran = Try("PICKUP-SYNC", "report a pickup the way the game does", delegate
+            {
+                if (ParachutePickup.m_flyablePickedUpObjectDelegate != null) ParachutePickup.m_flyablePickedUpObjectDelegate(FlyableManager.PickupItem.Parachute, fake);
+            });
+            yield return null;
+            int mine = CountType(SharedWorld.MsgPickup);
+            Check("PICKUP-SYNC", "a flower I take is announced once", ran && hooked && mine == 1, "hooked=" + hooked + ", " + mine + " pickup messages");
+            sink.Messages.Clear();
+            Try("PICKUP-SYNC", "report a dropped leaf being taken", delegate
+            {
+                if (ParachutePickup.m_flyablePickedUpObjectDelegate != null) ParachutePickup.m_flyablePickedUpObjectDelegate(FlyableManager.PickupItem.Glider, dropped);
+            });
+            yield return null;
+            Check("PICKUP-SYNC", "a dropped leaf (it exists only on the dropper's PC) is never announced", CountType(SharedWorld.MsgPickup) == 0, CountType(SharedWorld.MsgPickup) + " pickup messages");
+            Destroy(fake); Destroy(dropped);
+
+            if (all.Count == 0) { Note("PICKUP-SYNC: no flower or leaf pickup in this save; a friend's take was not tried"); yield break; }
+            var target = all[0];
+            var go = target.gameObject;
+            var type = target.m_parachuteType;
+            bool respawns = go.GetComponent<Respawn>() != null;
+            Vector3 spot = SharedWorld.TestPickupSpot(go);      // the first spot, as a real sender sends it (and where it grows back)
+            float moved = (go.transform.position - spot).magnitude;
+            if (moved > 0.5f) Note("PICKUP-SYNC: that pickup is " + moved.ToString("F2") + " m from its first spot");
+            float wait = target.m_destroyTime + 1.5f;
+            sink.Messages.Clear();
+            Try("PICKUP-SYNC", "friend's pickup message", delegate { SharedWorld.Handle(SharedWorld.TestPickupMessage(type, spot)); });
+            yield return null;
+            Check("PICKUP-SYNC", "a friend's take removes the pickup script here at once (my hand can no longer take it)", go != null && go.GetComponent<ParachutePickup>() == null, go == null ? "object gone" : "script still there=" + (go.GetComponent<ParachutePickup>() != null));
+            yield return new WaitForSeconds(wait);
+            var item1 = fm != null ? fm.m_pickupItem : FlyableManager.PickupItem.None;
+            Check("PICKUP-SYNC", "a friend's " + type + " shrinks away here", go == null, go == null ? "gone" : "still there after " + wait.ToString("F1") + " s");
+            Check("PICKUP-SYNC", "a friend's take never goes into my inventory", item1 == item0, item0 + " -> " + item1);
+            Check("PICKUP-SYNC", "a friend's take is not sent back", CountType(SharedWorld.MsgPickup) == 0, CountType(SharedWorld.MsgPickup) + " pickup messages");
+            if (!respawns) { Note("PICKUP-SYNC: that pickup does not grow back in this game"); yield break; }
+            Cond grownBack = delegate
+            {
+                foreach (ParachutePickup pk in UnityEngine.Object.FindObjectsOfType(typeof(ParachutePickup)))
+                    if (pk != null && pk.m_parachuteType == type && (pk.transform.position - spot).magnitude < 1f) return true;
+                return false;
+            };
+            yield return StartCoroutine(WaitUntil(grownBack, 3.5f, 0f));   // was a fixed 3 s
+            bool back = grownBack();
+            Check("PICKUP-SYNC", "the friend's " + type + " grows back here too", back, back ? "back" : "not back after 3 s");
         }
 
         IEnumerator TestTeleporters()

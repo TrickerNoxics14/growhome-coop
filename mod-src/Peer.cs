@@ -14,6 +14,9 @@ namespace CoopMod
 
         public GameObject Clone;
         public RemoteDriver Driver;
+        public RemoteFx Fx;                      // the copy's jetpack flame and flower/leaf (visual only)
+        public ushort LastFxId; public bool FxIdKnown;   // the newest one-off event (voice, landing, death) already shown
+        public int FxTaken;                               // events let through the repeat filter (also with no copy to show them on)
 
         public uint LastRecvSeq;
         public float LastPacketTime = -999f, ConnectedAt = -999f;
@@ -39,11 +42,12 @@ namespace CoopMod
 
         public float NextCloneDiag, NextPing, NextSyncLog;
         public float GapMax, GapSum, RttSum, RttMax;
+        public float RttLast;                    // the newest round trip in ms (a race GO is sent half of it early)
         public int GapN, RttN;
 
         public string Name;                      // the Steam name, cleaned (see PlayerNames); empty until Steam has told us
         public string Label { get { return IsBot ? "Bot " + BotIndex + " (" + ((SceneProfile.CharacterSkin)BotSkin) + ")" : (string.IsNullOrEmpty(Name) ? "Player " + Number : Name); } }
 
-        public void ClearClone() { Clone = null; Driver = null; CloneTsMap.Clear(); CloneRsMap.Clear(); VisLogged = false; LastAppliedSkin = -1; }
+        public void ClearClone() { Clone = null; Driver = null; Fx = null; CloneTsMap.Clear(); CloneRsMap.Clear(); VisLogged = false; LastAppliedSkin = -1; }
     }
 }

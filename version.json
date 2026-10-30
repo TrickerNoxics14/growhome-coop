@@ -1,7 +1,7 @@
 ﻿{
-    "version":  13,
+    "version":  14,
     "dll":  "https://raw.githubusercontent.com/TrickerNoxics14/growhome-coop/main/CoopMod.dll",
-    "sha256":  "d7c3b3488c013d5c8a07c299b4d7a3b372869ee49057519220496dc4bd0e0423",
-    "notes":  "Everyone in a party now plays in the leader\u0027s save: guests always load the leader\u0027s world, can never overwrite it, and the leader\u0027s save is backed up automatically.",
-    "signature":  "FR8cOmfItadGWoFcVw1Ri2nl8DlEkFIna0evRUEzDpq/omW0FbXmyonyg5o3CG7M+NeUSHe4akgQzCbRUODbxJTEazIkVIyRKSfhZyCsa3H7zmLyy2eXIwyRa+5npcrIaSY61rrW8jICC8vtEvD+r6O8jfnUt3WdrAaFrw7Lw1DhJbLIz/Fa0ztH86UIw8Tz9kyVm7pO4Wk32Rt7nFYLOSvDdiIUw58C/BMOA/Sspa7oDAkI4zFeu3l2ZM5mywNvKyXTGauwxXRs121pX+xJn8bTMtixG39JCxO0Og8Ah/3Fe71b1QNp4DOkDG5SrBOibe0dMa/K5QiMSxBtpoVrHzg3qDFIWZdkhemfFVbLiYBc0hs+Eh5zxbixbjnDIMzKyhXeV9d440CQz/kzv/A3u+AuhU1gJW0cjHlOhMfwQle0K8DBA4x3LIR7mRKycVmf9wpAjr5UCtH0aTg+nkCShBbZOzZSX28lwUuckX8ibMCTwm4ix0rLyB4139hKQQv8"
+    "sha256":  "670ad2bc9bfcf1f09fa84b1981a561e497c32e78dd85ff0177a3a48e7d59a9fa",
+    "notes":  "Friends\u0027 jetpack flames, flowers, leaves, voices and landings now show; pickups sync; plus a speedrun mode (solo, race, co-op run) with the speedrun.com categories.",
+    "signature":  "QpU7I63fiu7b/ybjnSkKBVavWUMxWxJFzNFArxPtxegOUasgyQo5CzeunR/LBn0LM2M9XJL1v3ODPAD7/KUoZFthFVlfQerAhg2FAtGX2jgqV1633vgctspU0NfntGTYg+IPWlnZakWZeHJyiKbGXvxJBz/l5N6Xs2CCZt5Qhjv+Xm+ENLRzYF59jY/Wv5aDq2VfDnOfC9Xh6HrDwB+T7KDbuhNjwzVuus+gRBnOzoTbD5Daww/VthyLORne7s/32hkmvDg9XznW2muGm/iDUaedh0gxUyr4rPrngIpReg0rQrOEG88bVBnKde9K9x22uQgukPzwLXE04VXkmny07VESKvNjGkcoLu16Pk+zIRitDWlTQJ1C1iBoJPlGyF8yvWXrMr4dVFrPYJXS4hQeNnORaSDvcpgvocqtO67mHcX0JXImLJd5tDzyTMo0KA20AQ6oMStkyBU/m8+A5hGGMkeqoRzWOuwRPwMYjB9eAMZgjys2A6N7pxJoEhxW7zuk"
 }

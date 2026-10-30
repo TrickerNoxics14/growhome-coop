@@ -10,7 +10,7 @@ It builds the mod and the launcher, starts the real game in its own copy (the ga
 inside it, closes it, puts your saves and settings back exactly as they were, and prints PASS / FAIL for each check.
 Exit code 0 means every critical check passed in a full run; 1 means something did not; 3 means a partial or quick run (not a release gate); 2 means Grow Home was running and nothing was touched. The newest report is `audit\latest-report.md`.
 
-Options: `-Quick` (shorter, for development, never a release gate), `-SkipGame`, `-SkipExe`, `-KeepBuild`, `-ForceClose`
+Options: `-Quick` (shorter, for development, never a release gate), `-Quick -Groups clone,fx` (QUICK AUDIT of only those groups - world, plants, party, net, clone, fx, ui, launcher - see `audit\check-groups.txt`; it prints "QUICK AUDIT (not a release audit)" and never writes `last-full-pass.md`), `-SkipGame`, `-SkipExe`, `-KeepBuild`, `-ForceClose`
 (close a running Grow Home first; without it the audit refuses to start, so it never kills a game you are playing).
 
 **A release is allowed only when one full run (no -Quick, nothing skipped) shows every check PASS.**
@@ -78,6 +78,35 @@ Where they run: **game** = inside the real game, using the real send/receive cod
 | NO-UNEXPECTED-ERRORS | script | the mod log and the Unity log have no errors or exceptions from the mod | scans both logs (only lines tagged `[test]` are allowed: the injected fault) |
 | ORIGINAL-UNTOUCHED | script | the real Steam save files and the original Grow Home assembly are exactly as before | hashes before and after |
 | AUDIT-RESTORED | script | the test copy's saves, logs and settings are put back exactly | hashes before and after |
+| SR-TIMER | game | the speedrun timer is real time (RTA) and exact | an injected clock (start, stop, 30 h), the format, and the real clock while the game is stopped |
+| SR-SPLITS-ANY | game | Any% / NG+ split in order and end only on the computer switch | synthetic event streams: skips, repeats, a fade or a seed that must not end it |
+| SR-SPLITS-ASS | game | All Star Seeds splits per seed and ends only on the final fade | synthetic event streams, and an absurd seed total kept to 16 splits |
+| SR-SPLITS-100 | game | 100% ends on the last seed after everything else, an early last seed cannot finish | synthetic event streams in any order |
+| SR-COMPARE | game | +/- against the PB, gold segments, sum of best, the timer colour | a run against a made-up PB |
+| SR-RECORDS | game | PB and best segments survive, invalid runs are kept out, a damaged file falls back to its backup | round trips in a temp folder, a slower run, garbage text |
+| SR-MENU-ROWS | game | every SPEEDRUN page fits the menu rules | the pure line builder for every page |
+| SR-VALIDITY | game | Any% skin rules, assists, early last seed | the pure rules and a run fed an early seed |
+| SR-LIVESPLIT | game | LiveSplit gets the commands in order and never slows the game | a local TCP listener, then nobody listening |
+| SR-MENU | game | SPEEDRUN is reached from the game's own start menu | the real start menu line and the copied Settings menu |
+| SR-START-FRAME | game | the timer starts on the NEW GAME frame, never without the slot | the real START RUN line, the game's own new-game flag, a fault injected |
+| SR-CLOUD-OFF | game | no speedrun while Steam Cloud saving is on | the cloud flag forced on for one call, then the save files compared |
+| SR-NEWGAME-FRESH | game | the slot game is a fresh new game with no skins for Any% | the real slot game |
+| SR-EVENTS-LIVE | game | the game's own events reach the run in the same frame | real AddAccomplishment, AddShard and databank scans |
+| SR-BACKUP-GUARD | game | no slot world is backed up over my real backups | the real backup call in the slot |
+| SR-SKIN-GUARD | game | my co-op skin file is not used or changed by a speedrun | coop-skin.txt set to Ninja for a slot run |
+| SR-PERF | game | the speedrun tick is cheap | 300 ticks in a running slot game, time and heap |
+| SR-UI | game | the timer panel draws every state and fits every screen | OnGUI with sample runs, and the panel layout at 800x450, 1280x720 and 4K |
+| SR-RESET-RESTORE | game | RESET RUN ends cleanly and gives my own save back | the real pause-menu action, runs.log, the records file and the save paths |
+| SR-SLOT-ISOLATION | game | a speedrun never changes my own save | hashes of every save file and the backups before and after two slot runs with forced saves |
+| SR-LEVER-END | game | Any% ends on the computer switch | the real lever's UnityEvent fired after the first seed |
+| SR-100-END | game | 100% ends on the last seed after everything else | real crystals, databank scans, endings and AddSeed in the slot game |
+| SR-ASS-END | game | All Star Seeds ends when the final fade is black | the real final sequence started by the game after the last seed |
+| SR-RECORDS-LIVE | game | a finished run becomes the PB on disk | the records file and runs.log after the run |
+| SR-GATE | game | race and co-op run messages are only taken at their exact size, the leader-only ones only from the leader, and older mods ignore them | every type at its size and one byte off, hostile fields, a stale run, a non-leader ARM, a PROGRESS flood, the old world path |
+| SR-RACE-FSM | game | a race arms, waits for READY (15 s at most), counts down, notices silent racers and ranks the results | the race rules with made-up players: timeouts, version mismatch, stale messages, OFFLINE and DNF, ties |
+| SR-RACE-LOOP | game | a whole race works: everybody gets their own slot, starts on the same GO, sees the others live, and gets the results | five fake players (one busy, one on an old mod, one going quiet) through the real gate and the real race code, with a fake clock |
+| SR-COOP-TIMER | game | a co-op run has one timer (the leader's) that every member sees; members' splits count only from the leader's world | a fake leader and member: extrapolated time, events in and out of the world, duplicates, HOST LOST, the final time |
+| SR-RACE-ISOLATION | game | during a speedrun nothing of anybody else's world reaches mine, and mine is never sent | plant, crystal, island, teleporter, pickup, world request, snapshot, epoch and have-world messages from a player through the real message routing in a slot game |
 
 ## Real bugs this audit has already caught (and that are now fixed)
 
@@ -117,3 +146,12 @@ It never publishes anything: pushing a new version to GitHub for friends is a se
 | PARTY-LEAVE | game | a party never leaves a player stuck on somebody else's save, and leaving it really disconnects | the real save paths and the mod's player list |
 | COOP-MENU | game | co-op is reached from the game's own pause menu, through a real game menu | the real pause menu and the copied Settings menu, driven through their buttons |
 | HUD-MSG | game | co-op messages use the game's own M.O.M panel, falling back to the overlay when it cannot show them | the real HUD queue: shown, ordered, pushed-aside game message restored, busy panel, stopped game |
+| NET-FX | game | the jetpack and flower/leaf parts of a pose packet survive the trip exactly, and cut-off or silly ones are refused | round trips with a flower, a leaf and held objects; every cut-off; both flags at once, NaN, far away, too many petals, a flag without its data; an old-layout packet |
+| CLONE-FX | game | a friend's jetpack flame and flower/leaf show on their copy without any of the game's scripts, and never touch my fuel, flight lock or inventory | spawns a copy, switches the flame and flower/leaf on and off and lets the link go quiet; counts scripts, colliders and rigidbodies; compares my fuel, flight time, lock and inventory |
+| PICKUP-SYNC | game | a flower or leaf a friend takes disappears here and grows back, but never goes into my inventory; mine is announced once, a dropped leaf never | wrong lengths at the gate, a made-up spot, bad types; the game's own pickup report; a friend's message for a real pickup of the save (a Note when the save has none) |
+| CLONE-SCRIPTS | game | the friend's copy (a copy of MY walkster) runs nothing that reaches my BUD, HUD, save, input, camera or voice | lists every script on a fresh copy against a deny list (and any singleton); checks its guard; removes it and looks for its skin callback in the game's load queue |
+| CLONE-VOICE | game | a friend jumping never makes MY BUD say the jump line; their copy says it | a real guarded jump of the copy with both voice sources silent first; reads which sound event each source plays one step later |
+| CLONE-VOICE-RESTORE | game | the one physics step in which a copy jumps changes nothing of mine for good | compares the game's voice field and its leaf-jump and achievement hooks before and after; inside a real window adds the leaf achievement and plays the leaf foley on my body, then checks the achievement is gone unheard, the sound follows the copy and the rumble is cut (a Note when the save already has the achievement) |
+| CLONE-IMMORTAL | game | a friend's copy bumping hard into something does not cut my voice or count a death of mine | reads the copy's immortal flag, clears it and waits for the driver to set it again, feeds the game's collision handler a 30 m/s bump and compares my death counters and voice |
+| CLONE-NO-CHUNK | game | a venus trap, a ram or water cannot leave a friend's copy broken in my world | calls the game's chunker on a copy and checks it returns nothing and the copy is back, with driver and walker, 2 frames later |
+| NET-FX-EVENT | game | a friend's voice lines, hard landings and deaths show on their copy, never on my BUD, and old players are not disturbed by the new packet part | round trips, every cut-off, wrong bank/names/lengths/counts/normals/distances/causes, prefix equality with the old layout, repeat and wrap-around handling; a relayed line, a landing on the ground under the copy (a Note when there is none), a death and a respawn on a spawned copy; my own voice line and three landing strengths through the real announcer |

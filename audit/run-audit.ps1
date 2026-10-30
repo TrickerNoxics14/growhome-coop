@@ -11,6 +11,10 @@
     grows the plants, plays the network messages in and out, then closes), the launcher's checks run against a throw-away web server.
   - The game's saves, settings and mod file are backed up first and put back afterwards, even if the audit is interrupted.
   - -Quick   shorter plant growth (development only, a quick run is not a release gate)
+  - -Quick -Groups clone,fx   QUICK AUDIT of only those groups (world, plants, party, net, clone, fx, ui, speedrun, launcher): the game runs only the
+    sections tagged with them (coopmod\SelfTest.cs), the verdict requires only the checks of those groups (audit\check-groups.txt),
+    the launcher stage runs only with the group "launcher", and the launcher is not rebuilt when its sources did not change.
+    -Groups implies -Quick. A quick run NEVER writes last-full-pass.md, so publish.ps1 and deploy.ps1 never accept it.
   - -SkipGame / -SkipExe   leave that part out (the verdict then says PARTIAL)
   - -KeepBuild   leave the audited mod installed in the test copy afterwards (default: put the previous mod back)
   - -ForceClose  close a running Grow Home first (default: stop with a message, so a game you are playing is never killed)
@@ -18,6 +22,7 @@
 #>
 param(
     [switch]$Quick,
+    [string[]]$Groups,
     [switch]$SkipGame,
     [switch]$SkipExe,
     [switch]$KeepBuild,
@@ -41,6 +46,21 @@ $Report   = Join-Path $AuditDir "reports\$Stamp"
 $Steam    = Join-Path ${env:ProgramFiles(x86)} 'Steam'
 $OriginalAssemblySha = '8d99d51663061da95016e496116191850b6a5437250cfc38bb8576027b2aa40d'   # Grow Home Steam build 857617
 New-Item -ItemType Directory -Force -Path $Report | Out-Null
+
+# quick audit groups (-Groups a,b or -Groups "a,b" both work); $QuickGroups = $null means every group
+$KnownGroups = 'world', 'plants', 'party', 'net', 'clone', 'fx', 'ui', 'speedrun', 'launcher'
+$QuickGroups = $null
+if ($Groups) {
+    $QuickGroups = @($Groups | ForEach-Object { $_ -split '[,\s]+' } | Where-Object { $_ } | ForEach-Object { $_.Trim().ToLower() } | Select-Object -Unique)
+    $unknown = @($QuickGroups | Where-Object { $KnownGroups -notcontains $_ })
+    if ($unknown.Count -gt 0 -or $QuickGroups.Count -eq 0) { Write-Host "Unknown group(s): $($unknown -join ', '). Known groups: $($KnownGroups -join ', ')" -ForegroundColor Red; exit 2 }
+    $Quick = $true                                                   # choosing groups is always a quick audit, never a release audit
+}
+$GameGroups   = if ($QuickGroups) { @($QuickGroups | Where-Object { $_ -ne 'launcher' }) } else { $null }
+$ExeSkipped   = $SkipExe -or ($QuickGroups -and $QuickGroups -notcontains 'launcher')
+$GameSkipped  = $SkipGame -or ($QuickGroups -and $GameGroups.Count -eq 0)
+$QuickLabel   = 'QUICK AUDIT (not a release audit)'
+$GroupsText   = if ($QuickGroups) { $QuickGroups -join ',' } else { 'all' }
 
 $Checks = New-Object System.Collections.ArrayList
 function Add-Check([string]$Id, [bool]$Ok, [string]$Text, [string]$Detail = '') {
@@ -139,25 +159,57 @@ function Invoke-Build([string]$Project, [string]$Label) {
 }
 
 # ---- 1. build ------------------------------------------------------------------------------------------------------------------------
-Say "== Grow Home Co-op audit  $Stamp$(if ($Quick) { '  (QUICK: not a release gate)' })" 'Cyan'
+Say "== Grow Home Co-op audit  $Stamp$(if ($Quick) { "  ($QuickLabel, groups: $GroupsText)" })" 'Cyan'
+if ($Quick) { Say "   $QuickLabel - it is never accepted by publish.ps1 or deploy.ps1; only a full run of every check is." 'Yellow' }
 Say "1/4 build"
-$modBuilt = $false; $exeBuilt = $false
+
+# What the launcher is built from (its folder without bin/obj). The bundled CoopMod.dll counts only when the launcher's own checks run:
+# the game stage installs the audited mod itself and the launcher finds the copy installed, so its bundled mod is not used there.
+$ExeStamp = Join-Path $AuditDir 'work\exe-build-stamp.txt'
+function Get-ExeSourceHash([bool]$WithMod) {
+    $exeDir = (Get-Item (Join-Path $Root 'exe')).FullName.TrimEnd('\')
+    $lines = Get-ChildItem $exeDir -Recurse -File | Where-Object { $_.FullName.Substring($exeDir.Length) -notmatch '^\\(bin|obj)\\' -and $_.Name -ne 'CoopMod.dll' } |
+        Sort-Object FullName | ForEach-Object { $_.FullName.Substring($exeDir.Length) + ' ' + (Get-FileHash $_.FullName -Algorithm SHA256).Hash }
+    if ($WithMod) { $lines = @($lines) + ('mod ' + (Get-FileHash $ModDll -Algorithm SHA256).Hash) }
+    $sha = [Security.Cryptography.SHA256]::Create()
+    return ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes(($lines -join "`n")))) -replace '-', '').ToLower()
+}
+
+$modBuilt = $false; $exeBuilt = $false; $exeReused = $false
 try {
     $modBuilt = Invoke-Build $ModProj 'mod'
     if ($modBuilt -and -not (Test-Path $ModDll)) { $modBuilt = $false }
     if ($modBuilt) {
-        Copy-Item $ModDll (Join-Path $Root 'exe\CoopMod.dll') -Force          # the launcher carries the mod inside itself
-        $exeBuilt = Invoke-Build $ExeProj 'exe'
-        if ($exeBuilt -and -not (Test-Path $ExeFile)) { $exeBuilt = $false }
+        $withMod = -not $ExeSkipped
+        if ($Quick -and (Test-Path $ExeStamp) -and (Test-Path $ExeFile)) {
+            $st = (Get-Content $ExeStamp -Raw).Trim().Split(' ')
+            $srcNow = Get-ExeSourceHash $false
+            $ok = $st.Count -eq 3 -and $st[0] -eq $srcNow -and $st[2] -eq (Get-FileHash $ExeFile -Algorithm SHA256).Hash.ToLower()
+            if ($ok -and $withMod) { $ok = $st[1] -eq (Get-ExeSourceHash $true) }
+            if ($ok) { $exeBuilt = $true; $exeReused = $true; Say "  launcher sources unchanged since its last build: not rebuilt (quick audit)" 'DarkGray' }
+        }
+        if (-not $exeReused) {
+            Copy-Item $ModDll (Join-Path $Root 'exe\CoopMod.dll') -Force          # the launcher carries the mod inside itself
+            $exeBuilt = Invoke-Build $ExeProj 'exe'
+            if ($exeBuilt -and -not (Test-Path $ExeFile)) { $exeBuilt = $false }
+            if ($exeBuilt) {
+                New-Item -ItemType Directory -Force -Path (Split-Path $ExeStamp) | Out-Null
+                "$(Get-ExeSourceHash $false) $(Get-ExeSourceHash $true) $((Get-FileHash $ExeFile -Algorithm SHA256).Hash.ToLower())" | Set-Content $ExeStamp -Encoding ascii
+            } else { Remove-Item $ExeStamp -ErrorAction SilentlyContinue }
+        }
     }
 } catch { Say "  build crashed: $($_.Exception.Message)" 'Red' }
 $modHash = if ($modBuilt) { (Get-FileHash $ModDll -Algorithm SHA256).Hash.ToLower() } else { '' }
-Add-Check 'BUILD-OK' ($modBuilt -and $exeBuilt) 'the mod and the launcher build without errors' $(if ($modBuilt -and $exeBuilt) { "mod sha256 $($modHash.Substring(0, 16))" } else { "mod built=$modBuilt exe built=$exeBuilt (see reports\$Stamp\build-*.txt)" })
+Add-Check 'BUILD-OK' ($modBuilt -and $exeBuilt) 'the mod and the launcher build without errors' $(if ($modBuilt -and $exeBuilt) { "mod sha256 $($modHash.Substring(0, 16))$(if ($exeReused) { '; launcher not rebuilt (sources unchanged, quick audit)' })" } else { "mod built=$modBuilt exe built=$exeBuilt (see reports\$Stamp\build-*.txt)" })
 
 # ---- 2. launcher checks --------------------------------------------------------------------------------------------------------------
+# Not run in parallel with the game stage, on purpose: the launcher's --audit refuses several checks while any GrowHome process runs
+# (UPDATE-STAGED-APPLY, RUNNING-GAME, LAUNCH-VERIFY), starts fake "GrowHome.exe" processes of its own (which the game stage would take for
+# the game, and Stop-Game would kill), and its patch check reads the real co-op copy's Managed folder while the game stage swaps CoopMod.dll there.
 Say "2/4 launcher (updater and patcher)"
 $exeRan = $false
 if ($SkipExe) { Say "  skipped (-SkipExe)" 'Yellow' }
+elseif ($ExeSkipped) { Say "  skipped (quick audit without the group 'launcher')" 'Yellow' }
 elseif (-not $exeBuilt) { Say "  not run: the build failed" 'Red' }
 else {
     Assert-GameClosed
@@ -173,6 +225,7 @@ else {
 Say "3/4 game (mod checks inside the real game)"
 $gameRan = $false
 if ($SkipGame) { Say "  skipped (-SkipGame)" 'Yellow' }
+elseif ($GameSkipped) { Say "  skipped (quick audit without an in-game group)" 'Yellow' }
 elseif (-not $modBuilt) { Say "  not run: the build failed" 'Red' }
 elseif (-not (Test-Path (Join-Path $GameDir 'GrowHome.exe'))) { Say "  not run: no co-op copy of the game at $GameDir" 'Red' }
 else {
@@ -199,7 +252,9 @@ else {
         }
         Copy-Item $ModDll (Join-Path $Managed 'CoopMod.dll') -Force
         if (Test-Path $savesDir) { Remove-Item $savesDir -Recurse -Force -ErrorAction SilentlyContinue }   # the audit plays a fresh copy of the world (small starting plants), never the owner's grown save; the restore after the run puts that back
-        Set-Content (Join-Path $GameDir 'coop-selftest.txt') $(if ($Quick) { 'quick' } else { 'audit' }) -Encoding ascii
+        $selftest = @($(if ($Quick) { 'quick' } else { 'audit' }))
+        if ($GameGroups) { $selftest += "groups=$($GameGroups -join ',')" }       # the mod runs only the sections of these groups (SelfTest.cs On(...))
+        Set-Content (Join-Path $GameDir 'coop-selftest.txt') $selftest -Encoding ascii
         # start the game the way a friend does: open the launcher window; here it presses Play by itself. It must start the co-op copy, confirm that the mod loaded and close again.
         $launcherLog = Join-Path (Split-Path $GameDir -Parent) 'launcher.log'
         $logBefore = if (Test-Path $launcherLog) { @(Get-Content $launcherLog).Count } else { 0 }
@@ -299,15 +354,37 @@ foreach ($line in Get-Content (Join-Path $AuditDir 'required-checks.txt')) {
     $parts = $line.Split('|')
     $required += [pscustomobject]@{ Id = $parts[0].Trim(); Where = $parts[1].Trim(); Title = $parts[2].Trim() }
 }
+# quick audit: which groups each in-game check belongs to (audit\check-groups.txt; only read for a quick run with -Groups)
+$groupMap = @{}
+if ($QuickGroups) {
+    $gf = Join-Path $AuditDir 'check-groups.txt'
+    if (Test-Path $gf) {
+        foreach ($line in Get-Content $gf) {
+            if ($line -match '^\s*#' -or $line.Trim() -eq '') { continue }
+            $parts = $line.Split('|')
+            if ($parts.Count -ge 2) { $groupMap[$parts[0].Trim()] = @($parts[1].Split(',') | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ }) }
+        }
+    } else { Say "  audit\check-groups.txt is missing: every in-game check is required" 'Yellow' }
+}
+function Test-InScope($r) {
+    if (-not $QuickGroups) { return $true }                          # a full audit (and -Quick without -Groups) requires everything
+    if ($r.Id -eq 'BUILD-OK') { return $true }
+    if ($r.Where -eq 'exe') { return ($QuickGroups -contains 'launcher') }
+    if ($r.Where -eq 'script') { return (-not $GameSkipped) }
+    if (-not $groupMap.ContainsKey($r.Id)) { return $true }          # no group on record: required in every quick run
+    foreach ($g in $groupMap[$r.Id]) { if ($QuickGroups -contains $g) { return $true } }
+    return $false
+}
+
 $rows = New-Object System.Collections.ArrayList
 $failed = 0; $skipped = 0; $passed = 0
 $scriptGameChecks = 'GAME-STARTS-MODDED', 'NO-UNEXPECTED-ERRORS', 'ORIGINAL-UNTOUCHED', 'AUDIT-RESTORED', 'LAUNCH-VERIFIED'
 foreach ($r in $required) {
     $mine = @($Checks | Where-Object { $_.Id -eq $r.Id })
-    $skip = ($SkipGame -and ($r.Where -eq 'game' -or $scriptGameChecks -contains $r.Id)) -or ($SkipExe -and $r.Where -eq 'exe')
+    $skip = ($GameSkipped -and ($r.Where -eq 'game' -or $scriptGameChecks -contains $r.Id)) -or ($ExeSkipped -and $r.Where -eq 'exe') -or -not (Test-InScope $r)
     $detail = ''
     if ($mine.Count -eq 0) {
-        if ($skip) { $status = 'SKIPPED'; $skipped++ } else { $status = 'NOT RUN'; $failed++ }
+        if ($skip) { $status = 'SKIPPED'; $skipped++ } else { $status = 'NOT RUN'; $failed++; if ($QuickGroups -and $r.Where -eq 'game' -and -not $groupMap.ContainsKey($r.Id)) { $detail = 'this check has no group in audit\check-groups.txt, so every quick run requires it' } }
     } else {
         $bads = @($mine | Where-Object { -not $_.Ok })
         if ($bads.Count -gt 0) { $status = 'FAIL'; $failed++; $detail = ($bads | Select-Object -First 3 | ForEach-Object { $_.Text + $(if ($_.Detail) { ' - ' + $_.Detail } else { '' }) }) -join ' || ' }
@@ -326,9 +403,11 @@ foreach ($row in $rows) {
     if ($row.Status -in 'FAIL', 'NOT RUN' -and $row.Detail) { Say ("           -> " + $row.Detail) 'Red' }
 }
 Say ''
-$gate = (-not $Quick) -and $skipped -eq 0
+$gate = (-not $Quick) -and (-not $QuickGroups) -and $skipped -eq 0
 if ($failed -eq 0 -and $gate) { $verdict = "AUDIT PASSED: all $passed critical checks passed" }
-elseif ($failed -eq 0) { $verdict = "AUDIT PARTIAL: $passed passed, $skipped skipped$(if ($Quick) { ', quick run' }) - this is not a release gate" }
+elseif ($Quick -and $failed -eq 0) { $verdict = "$QuickLabel, groups $GroupsText - no failures: $passed passed, $skipped skipped. Only a full audit can release." }
+elseif ($Quick) { $verdict = "$QuickLabel, groups $GroupsText - FAILED: $failed of $($rows.Count) critical checks did not pass" }
+elseif ($failed -eq 0) { $verdict = "AUDIT PARTIAL: $passed passed, $skipped skipped - this is not a release gate" }
 else { $verdict = "AUDIT FAILED: $failed of $($rows.Count) critical checks did not pass" }
 Say $verdict $(if ($failed -eq 0 -and $gate) { 'Green' } elseif ($failed -eq 0) { 'Yellow' } else { 'Red' })
 
@@ -338,7 +417,8 @@ $md = New-Object System.Text.StringBuilder
 [void]$md.AppendLine('')
 [void]$md.AppendLine("**$verdict**")
 [void]$md.AppendLine('')
-[void]$md.AppendLine("Mod sha256: ``$modHash``  |  quick run: $Quick  |  game copy: ``$GameDir``")
+[void]$md.AppendLine("Mod sha256: ``$modHash``  |  quick run: $Quick  |  groups: $GroupsText  |  game copy: ``$GameDir``")
+if ($Quick) { [void]$md.AppendLine(''); [void]$md.AppendLine("**$QuickLabel**: only for development; publish.ps1 and deploy.ps1 accept only a full audit (last-full-pass.md).") }
 [void]$md.AppendLine('')
 [void]$md.AppendLine('| Result | Check | Where | What it proves |')
 [void]$md.AppendLine('|---|---|---|---|')
@@ -349,7 +429,8 @@ if ($fails.Count) { [void]$md.AppendLine(''); [void]$md.AppendLine('## What fail
 foreach ($c in $Checks) { [void]$md.AppendLine("- $(if ($c.Ok) { 'PASS' } else { 'FAIL' }) ``$($c.Id)`` $($c.Text)$(if ($c.Detail) { ' - ' + $c.Detail })") }
 $md.ToString() | Set-Content (Join-Path $Report 'audit-report.md') -Encoding UTF8
 Copy-Item (Join-Path $Report 'audit-report.md') (Join-Path $AuditDir 'latest-report.md') -Force
-if ($failed -eq 0 -and $gate) { Copy-Item (Join-Path $Report 'audit-report.md') (Join-Path $AuditDir 'last-full-pass.md') -Force }   # what deploy.ps1 trusts: only a full run in which everything passed
+if ($Quick) { Say "$QuickLabel - last-full-pass.md was not touched" 'Yellow' }
+if ($failed -eq 0 -and $gate -and -not $Quick -and -not $QuickGroups) { Copy-Item (Join-Path $Report 'audit-report.md') (Join-Path $AuditDir 'last-full-pass.md') -Force }   # what deploy.ps1 trusts: only a full run in which everything passed
 Say "report: $(Join-Path $Report 'audit-report.md')" 'DarkGray'
 
 # keep the disk tidy: the last 3 backups and the last 10 reports

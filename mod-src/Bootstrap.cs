@@ -33,7 +33,7 @@ namespace CoopMod
 
     // Co-op for up to MaxPeers other players. Every player connects to every other player (full mesh) and shows a copy of each of them.
     // The player with the lowest SteamID64 is the "host": the others copy that player's world when they join.
-    public class CoopBehaviour : MonoBehaviour
+    public class CoopBehaviour : MonoBehaviour, ISrLink
     {
         const float SendInterval = 0.05f; // 20 Hz
         const int MaxPeers = 7;
@@ -124,9 +124,11 @@ namespace CoopMod
         {
             Application.runInBackground = true; // test windows must keep updating while unfocused
             SaveGuard.Redirect(Here("coop-saves")); // never touch the real save folder or Steam Cloud
+            Speedrun.Init(Directory.GetParent(Application.dataPath).FullName);   // after the save folder is known: a run cut off by a crash is logged
+            SpeedrunNet.Init(this, StartCoopRun);                                 // races and co-op runs (SpeedrunNet.cs)
             AutoSync.Enabled = File.Exists(Here("coop-autosync.txt"));
             SharedWorld.Enabled = !File.Exists(Here("coop-noshare.txt"));
-            CoopUI.Hidden = File.Exists(Here("coop-ui-hidden.txt"));
+            CoopUI.Hidden = !CoopUI.ShownForTest && File.Exists(Here("coop-ui-hidden.txt"));
             LoadPeerSpecs();
             try { string bf = Here("coop-bots.txt"); if (File.Exists(bf)) botsWanted = Math.Min(MaxPeers, int.Parse(File.ReadAllText(bf).Trim())); } catch (Exception) { }
             logName = "coopmod-steam.log";
@@ -181,6 +183,7 @@ namespace CoopMod
                 gcSeen0 = g0; gcSeen2 = g2;
             }
             WatchLock();
+            CloneGuard.Tick();
             SaveGuard.Tick();
             if (Online && AnyConnected) ResumeAfterFocusLoss();
             if (Input.GetKeyDown(KeyCode.F7) && Online) PullWorld();
@@ -200,6 +203,8 @@ namespace CoopMod
             if (Online && !chatOpen && !joinOpen && !hostMenuOpen && Input.GetKeyDown(KeyCode.T) && WorldSync.InWorld()) OpenChat();
             if (!Online && Time.realtimeSinceStartup >= nextSteamTry) TryStartSteam();
             WorldSync.Transitions();
+            try { Speedrun.Tick(); } catch (Exception e) { Log("speedrun: tick " + e.GetType().Name + " " + e.Message); }
+            SpeedrunNet.Tick();
             if (Online) NetTick();
             SettingsTick();
             NativeUI.Tick();
@@ -237,6 +242,7 @@ namespace CoopMod
         // F7: a guest asks the host for the host's world again. The host's world is the main world, so the host never pulls.
         void PullWorld()
         {
+            if (Speedrun.SlotActive) { Speedrun.Assist("WORLD PULL"); CoopUI.Toast("NOT DURING A SPEEDRUN"); return; }
             var host = HostPeer();
             if (IAmHost) { CoopUI.Toast("YOU ARE THE HOST: THIS IS THE MAIN WORLD"); return; }
             if (host == null) { CoopUI.Toast("THE HOST IS NOT CONNECTED YET"); return; }
@@ -254,6 +260,7 @@ namespace CoopMod
         // A guest copies the host's world once, a few seconds after the link comes up and the guest is in the world.
         void AutoPull()
         {
+            if (Speedrun.SlotActive) return;      // a speedrun plays its own slot world
             // whenever I play but not in the world the leader plays now (just came in, the leader moved on, my copy is an old one): copy theirs
             var host = HostPeer();
             if (host == null || !host.Connected || Time.realtimeSinceStartup - host.ConnectedAt < 3f) return;
@@ -499,6 +506,48 @@ namespace CoopMod
 
         public void DropGhostForTest(Peer p) { DropGhost(p); }
 
+        // What one reliable message from a player may do (MessageGate decides the kind). The audit sends messages through here too.
+        void RouteReliable(Peer p, byte[] rel) { RouteReliable(p, rel, HostPeer() == p); }
+        void RouteReliable(Peer p, byte[] rel, bool fromHost)
+        {
+            switch (MessageGate.Classify(rel, fromHost))
+            {
+                case Route.Visibility: ReceiveVisibility(p, rel); break;
+                case Route.Speedrun: SpeedrunNet.Handle(p.Id, rel, fromHost); break;
+                case Route.Chat: HandleChat(p.Id, p.Label, rel); break;
+                case Route.Shared:
+                    if (Speedrun.Isolated) { if (Time.realtimeSinceStartup - p.LastRefusedLog > 10f) { p.LastRefusedLog = Time.realtimeSinceStartup; Log("speedrun: ignored world changes from " + p.Label + " during my run"); } break; }
+                    if (!p.IsBot && !Authority.MayApply(RoomUsed, IAmHost, InMyWorld(p)))
+                    {
+                        // only my save is real: a player not yet in my world must not change it
+                        if (Time.realtimeSinceStartup - p.LastRefusedLog > 10f) { p.LastRefusedLog = Time.realtimeSinceStartup; Log("ignored world changes from " + p.Label + " (they are not in my world yet)"); }
+                        break;
+                    }
+                    SharedWorld.Handle(rel, p.Id); break;
+                case Route.HaveWorld:
+                    {
+                        if (Speedrun.Isolated) break;     // a race: no world of anybody else counts
+                        int e = BitConverter.ToInt32(rel, 1);
+                        if (IAmHost && e == WorldSync.MyEpoch && p.HasMyWorld != e) { p.HasMyWorld = e; Log(p.Label + " plays in my world now; their changes count"); }
+                        else if (IAmHost && e != WorldSync.MyEpoch) Log(p.Label + " plays in an older copy of my world; their changes do not count until they have the new one");
+                    }
+                    break;
+                case Route.Epoch:
+                    {
+                        if (Speedrun.Isolated) break;
+                        int e = BitConverter.ToInt32(rel, 1);
+                        if (WorldSync.LeaderEpoch != e) { WorldSync.LeaderEpoch = e; Log(p.Label + " plays world " + e + (WorldSync.LoadedEpoch == e ? " (the one I have)" : (WorldSync.InWorld() && WorldSync.GuestMode ? "; mine is another one, copying theirs" : ""))); }
+                        p.ToldHaveWorld = 0;      // answered again below: a note the leader lost or forgot (it reconnected) is made good within 3 s
+                    }
+                    break;
+                case Route.Oversized: Log("ignored an oversized message from " + p.Label); break;
+                case Route.SnapshotNotFromHost: Log("ignored world data from " + p.Label + " (not the host)"); break;
+                case Route.World: if (Speedrun.Isolated) break; if (WorldSync.IsSnapshot(rel)) WorldSync.EnterGuestMode(); WorldSync.Handle(p.Link, rel); break;
+            }
+        }
+
+        public void RouteReliableForTest(Peer p, byte[] rel, bool asHost) { RouteReliable(p, rel, asHost); }   // asHost: as if the party leader sent it
+
         float netTickStart;
         void NetTick()
         {
@@ -530,36 +579,7 @@ namespace CoopMod
                 while ((rel = p.Link.ReceiveReliable()) != null)
                 {
                     if (!talk) continue;                     // not (or no longer) in my room: heard by nobody
-                    switch (MessageGate.Classify(rel, HostPeer() == p))
-                    {
-                        case Route.Visibility: ReceiveVisibility(p, rel); break;
-                        case Route.Chat: HandleChat(p.Id, p.Label, rel); break;
-                        case Route.Shared:
-                            if (!p.IsBot && !Authority.MayApply(RoomUsed, IAmHost, InMyWorld(p)))
-                            {
-                                // only my save is real: a player not yet in my world must not change it
-                                if (Time.realtimeSinceStartup - p.LastRefusedLog > 10f) { p.LastRefusedLog = Time.realtimeSinceStartup; Log("ignored world changes from " + p.Label + " (they are not in my world yet)"); }
-                                break;
-                            }
-                            SharedWorld.Handle(rel, p.Id); break;
-                        case Route.HaveWorld:
-                            {
-                                int e = BitConverter.ToInt32(rel, 1);
-                                if (IAmHost && e == WorldSync.MyEpoch && p.HasMyWorld != e) { p.HasMyWorld = e; Log(p.Label + " plays in my world now; their changes count"); }
-                                else if (IAmHost && e != WorldSync.MyEpoch) Log(p.Label + " plays in an older copy of my world; their changes do not count until they have the new one");
-                            }
-                            break;
-                        case Route.Epoch:
-                            {
-                                int e = BitConverter.ToInt32(rel, 1);
-                                if (WorldSync.LeaderEpoch != e) { WorldSync.LeaderEpoch = e; Log(p.Label + " plays world " + e + (WorldSync.LoadedEpoch == e ? " (the one I have)" : (WorldSync.InWorld() && WorldSync.GuestMode ? "; mine is another one, copying theirs" : ""))); }
-                                p.ToldHaveWorld = 0;      // answered again below: a note the leader lost or forgot (it reconnected) is made good within 3 s
-                            }
-                            break;
-                        case Route.Oversized: Log("ignored an oversized message from " + p.Label); break;
-                        case Route.SnapshotNotFromHost: Log("ignored world data from " + p.Label + " (not the host)"); break;
-                        case Route.World: if (WorldSync.IsSnapshot(rel)) WorldSync.EnterGuestMode(); WorldSync.Handle(p.Link, rel); break;
-                    }
+                    RouteReliable(p, rel);
                 }
             }
             Perf.Begin(); AutoSync.Tick(broadcast, AnyConnected); Perf.End("AutoSync.Tick");
@@ -568,7 +588,7 @@ namespace CoopMod
             bool amGuest = leaderId != 0 && leaderId != myId;
             SharedWorld.LeaderId = leaderId;
             if (SharedWorld.MayTakeFrom == null) SharedWorld.MayTakeFrom = id => { foreach (var q in peers) if (q.Id == id) return q.IsBot || Authority.MayApply(RoomUsed, IAmHost, InMyWorld(q)); return false; };
-            if (Authority.MayShare(amGuest, WorldSync.HostWorldLoaded)) SharedWorld.Tick(broadcast); else SharedWorld.Hold();
+            if (Authority.MayShare(amGuest, WorldSync.HostWorldLoaded) && !Speedrun.Isolated) SharedWorld.Tick(broadcast); else SharedWorld.Hold();   // a racer shares nothing of its world
             if (amGuest && WorldSync.HostWorldLoaded && WorldSync.InWorld())
             {
                 var leader = HostPeer();
@@ -580,7 +600,7 @@ namespace CoopMod
                 }
             }
             // the host says which world it plays, now and then and to every new player (also without a party: a guest needs it to count as in the host's world)
-            if (IAmHost)
+            if (IAmHost && !Speedrun.Isolated)
                 foreach (var p in peers)
                 {
                     if (p.IsBot || !p.Connected || Time.realtimeSinceStartup < p.NextEpochSend) continue;
@@ -600,6 +620,10 @@ namespace CoopMod
             GrabLog(hands, "local", lastGrab);
             Perf.End("find player + grab log");
             Perf.Begin(); SendVisibility(root); Perf.End("SendVisibility");
+
+            // my voice lines, hard landings and death -> everybody (shown on my copy in their worlds)
+            LandWatch.Ensure(root);
+            VoiceWatch.Poll(root);
 
             // my state -> everybody
             if (walker != null && handler != null)
@@ -627,9 +651,19 @@ namespace CoopMod
                         leftGrab = hands != null && !menuOpen && hands.hand[0].grabbing,
                         rightGrab = hands != null && !menuOpen && hands.hand[1].grabbing,
                     };
+                    LocalFx.Fill(root, walker.body, s);   // jetpack flame and flower/leaf: visual only, sent also while the menu is open
+                    s.events = FxOutbox.Current();
                     pendJumpDown = pendJumpUp = false;
+                    LastSent = s;
                     broadcast.Send(s.Write());
                 }
+            }
+            else if (Time.time >= nextSend)
+            {
+                // my walkster is switched off (I just died: the game hides it until the respawn), so the death and the deadly
+                // landing still have to go out: the last pose I sent, standing still, with the events on it
+                var g = PoseWhileGone(LastSent, sendSeq + 1, FxOutbox.Current());
+                if (g != null) { nextSend = Time.time + SendInterval; sendSeq = g.seq; broadcast.Send(g.Write()); }
             }
 
             // everybody -> their copies
@@ -647,6 +681,7 @@ namespace CoopMod
                 if (data.Length == 5 && data[0] == 0xC2)
                 {
                     float rtt = (Time.realtimeSinceStartup - BitConverter.ToSingle(data, 1)) * 1000f;
+                    p.RttLast = rtt;
                     p.RttSum += rtt; p.RttN++; if (rtt > p.RttMax) p.RttMax = rtt;
                     Heard(p);
                     continue;
@@ -660,7 +695,7 @@ namespace CoopMod
                 Heard(p);
                 if (root == null) continue;
                 // only my save is real: a player who is not in my world yet neither moves things in it nor stands in it
-                bool inMine = p.IsBot || Authority.MayApply(RoomUsed, IAmHost, InMyWorld(p));
+                bool inMine = p.IsBot || (Speedrun.Isolated ? Speedrun.Ghosts : Authority.MayApply(RoomUsed, IAmHost, InMyWorld(p)));   // a race: the other racers are shown as ghosts only
                 if (!inMine) { ObjectSync.SetRemoteHeld(p.Id, new PlayerState.Held[0]); continue; }
                 if (p.Clone == null)
                 {
@@ -669,12 +704,46 @@ namespace CoopMod
                 }
                 var d = p.Driver;
                 p.RemoteSkin = s.skin;
-                ObjectSync.SetRemoteHeld(p.Id, s.held);
+                ObjectSync.SetRemoteHeld(p.Id, Speedrun.Isolated ? new PlayerState.Held[0] : s.held);   // a ghost racer never moves anything in my world
                 d.hasNet = true; d.netPos = s.pos + p.SelfOffset; d.netVel = s.vel; d.netTime = Time.time;
                 d.input.move = s.move; d.input.camForward = s.camForward; d.input.jumpScale = s.jumpScale;
                 d.input.leftGrab = s.leftGrab; d.input.rightGrab = s.rightGrab;
                 d.input.jumpDown |= s.jumpDown; d.input.jumpUp |= s.jumpUp;
+                d.input.airAbility = s.jet || s.fly != 0;
+                if (p.Fx != null) p.Fx.Set(s.jet, s.fly, s.flyOffset, s.flyRot, s.petals, s.wear, Time.time);
+                ApplyFxEvents(p, s);
             }
+        }
+
+        public static PlayerState LastSent;   // the last pose packet of my walkster (sent again with my events while it is switched off)
+
+        // A pose packet for while my walkster is gone: where I last was, no input, nothing held or flying, my waiting events. Null when nothing waits.
+        public static PlayerState PoseWhileGone(PlayerState last, uint seq, FxEvent[] events)
+        {
+            if (last == null || events == null || events.Length == 0) return null;
+            return new PlayerState
+            {
+                seq = seq, pos = last.pos, vel = Vector3.zero, camForward = last.camForward, move = Vector2.zero,
+                skin = last.skin, jumpScale = last.jumpScale, vis = last.vis ?? new byte[0], events = events,
+            };
+        }
+
+        // Each event comes in several packets in a row: only one with a newer number than the last one shown is played.
+        public static int ApplyFxEvents(Peer p, PlayerState s)
+        {
+            int shown = 0;
+            if (s.events == null) return 0;
+            foreach (var e in s.events)
+            {
+                if (e == null) continue;
+                int ahead = (ushort)(e.id - p.LastFxId);
+                if (p.FxIdKnown && (ahead == 0 || ahead > 32767)) continue;   // this one, or an older one, was shown already
+                p.LastFxId = e.id; p.FxIdKnown = true;
+                p.FxTaken++;
+                if (p.Fx == null) continue;
+                try { p.Fx.Play(e, s.pos); shown++; } catch (Exception ex) { Log("fx: event from " + p.Label + " failed: " + ex.GetType().Name + " " + ex.Message); }
+            }
+            return shown;
         }
 
         void SyncLog(Peer p)
@@ -741,6 +810,7 @@ namespace CoopMod
 
         void LateUpdate()
         {
+            Speedrun.LateTick();
             bool paused = Online && AnyConnected && Singleton<PauseManager>.Exists && PauseManager.Paused;
             FreezeMenus(WantMouse);
             if (paused || WantMouse)
@@ -769,6 +839,7 @@ namespace CoopMod
         float nextSkinPersist, worldSince = -1f; bool skinRestored; int lastSeenSkin = -1;
         void SkinPersistTick()
         {
+            if (Speedrun.SlotActive) return;     // a speedrun plays its own fresh skins (Any%: none unlocked), and never saves one as mine
             if (Time.time < nextSkinPersist) return;
             nextSkinPersist = Time.time + 0.5f;
             if (GameObject.Find("Walkster") == null) { worldSince = -1f; return; }
@@ -856,6 +927,7 @@ namespace CoopMod
             Vector3 f = Camera.main.transform.forward; f.y = 0f; f.Normalize();
             Vector3 dest = w1.body.position + f * 2f + Vector3.up * 0.5f;
             target.Clone.transform.position += dest - w2.body.position;
+            Speedrun.Assist("F4 FIND PLAYER");
             Log("clone: moved " + target.Label + " next to me by F4");
         }
 
@@ -942,7 +1014,7 @@ namespace CoopMod
 
         void CloneDiag(Peer p)
         {
-            if (p.Clone == null || Time.time < p.NextCloneDiag) return;
+            if (p.Clone == null || !p.Clone.activeSelf || Time.time < p.NextCloneDiag) return;   // switched off while they are dead
             p.NextCloneDiag = Time.time + 5f;
             var a = GameObject.Find("Walkster");
             var w1 = a != null ? a.GetComponentInChildren<BipedWalkScript>() : null;
@@ -964,7 +1036,7 @@ namespace CoopMod
             ShowNames = !File.Exists(Here("coop-noname.txt"));
             ShowChat = !File.Exists(Here("coop-nochat.txt"));
             SharedWorld.Enabled = !File.Exists(Here("coop-noshare.txt"));
-            CoopUI.Hidden = File.Exists(Here("coop-ui-hidden.txt"));
+            CoopUI.Hidden = !CoopUI.ShownForTest && File.Exists(Here("coop-ui-hidden.txt"));
         }
 
         static string ReadSmallFile(string f) { try { return File.Exists(f) ? File.ReadAllText(f) : ""; } catch (Exception) { return ""; } }
@@ -1134,6 +1206,13 @@ namespace CoopMod
                 if (s.AtStart) s.Status = "";
                 if (menuPage == "friends") s.Friends = FriendsNow();
             }
+            s.Screen = CoopMenu.ScreenNow;
+            if (s.Screen == CoopMenu.ScreenSpeedrun)
+            {
+                Speedrun.FillMenuState(ref s);
+                s.SrInParty = s.InLobby && lobby.Members().Count > 1;
+                s.SrIsMember = s.InLobby && !lobby.IsOwner;
+            }
             return s;
         }
 
@@ -1144,6 +1223,7 @@ namespace CoopMod
         public void CoopMenuAction(string id)
         {
             Log("ui: co-op menu: " + id);
+            if (id.StartsWith("sr_")) { Speedrun.MenuAction(id, lobby != null && lobby.InLobby && lobby.Members().Count > 1, lobby != null && lobby.InLobby && lobby.IsOwner); return; }
             switch (id)
             {
                 case "host_friends": if (lobby != null && !lobby.InLobby) lobby.Create(false, false, true); break;
@@ -1199,9 +1279,10 @@ namespace CoopMod
         public void MenuOpened() { menuPage = ""; reopenParty = false; }
         // the party menu stays up while the game is starting (no start menu buttons racing it), and for a member of a party on the start screen:
         // everybody plays the leader's game, so a member gets the start menu (CONTINUE / NEW GAME of their own) only by leaving the party
-        public bool BlockBack { get { return following || hostStarting || MemberAtStart; } }
+        public bool BlockBack { get { return following || hostStarting || MemberAtStart || RaceArmed; } }
+        static bool RaceArmed { get { return SpeedrunNet.Node != null && SpeedrunNet.Node.Armed && Singleton<StartScreen>.Exists; } }
         bool MemberAtStart { get { return AtStartScreen && lobby != null && lobby.InLobby && !lobby.IsOwner; } }
-        public void BackRefused() { if (MemberAtStart && !following) CoopUI.Toast("YOU PLAY IN THE LEADER'S GAME. LEAVE THE PARTY TO PLAY YOUR OWN"); }
+        public void BackRefused() { if (RaceArmed) { CoopUI.Toast(SpeedrunNet.Node.Race.IAmHost ? "THE RACE IS ARMED. CANCEL IT FIRST" : "THE RACE IS ARMED. LEAVE IT FIRST"); return; } if (MemberAtStart && !following) CoopUI.Toast("YOU PLAY IN THE LEADER'S GAME. LEAVE THE PARTY TO PLAY YOUR OWN"); }
         public bool MenuBack() { if (menuPage.Length == 0) return false; menuPage = ""; return true; }
         public void SetMenuPageForTest(string page) { menuPage = page ?? ""; }
         public bool FollowingForTest { get { return following; } }
@@ -1344,6 +1425,7 @@ namespace CoopMod
         // The leader presses START GAME: the leader's own game starts (CONTINUE, or NEW GAME without a save) and the party data says a game is on.
         void StartAsLeader()
         {
+            if (Speedrun.SlotActive) return;      // part 2 (co-op run) starts the leader game from the slot itself
             if (!StartScreenIdle || hostStarting || following || lobby == null || !lobby.InLobby || !lobby.IsOwner) return;
             if (WorldSync.GuestMode) WorldSync.LeaveGuestMode();
             if (WorldSync.GuestMode) { CoopUI.Toast("YOUR OWN SAVE IS NOT BACK YET, TRY AGAIN"); return; }
@@ -1356,6 +1438,47 @@ namespace CoopMod
             Log("party: I start the game (" + (fresh ? "new game" : "continue") + "); " + (lobby.Members().Count - 1) + " other players follow");
             StartScreen.StartGameCountdown(fresh);
         }
+
+        // CO-OP RUN (SpeedrunNet): the leader's new game in its own speedrun slot, then the party follows the normal way (the "play" note).
+        // Null when started, else what to tell the leader.
+        string StartCoopRun(SrCategory cat)
+        {
+            if (lobby == null || !lobby.InLobby || !lobby.IsOwner) return "HOST A PARTY FOR A CO-OP RUN";
+            if (!StartScreenIdle || hostStarting || following) return "ONLY ON THE START SCREEN";
+            if (WorldSync.GuestMode) WorldSync.LeaveGuestMode();
+            if (WorldSync.GuestMode) return "YOUR OWN SAVE IS NOT BACK YET, TRY AGAIN";
+            Speedrun.Category = cat; Speedrun.Mode = SrMode.Coop;
+            string why = Speedrun.EnterSlot(cat);
+            if (why != null) return why;
+            if (!CoopMenu.PartyMenuShowing()) CoopMenu.OpenFromStart(false);
+            WorldSync.NewLeaderWorld("co-op speedrun");
+            Speedrun.HoldSlot = true;
+            if (!Speedrun.BeginNewGame(out why)) { Speedrun.HoldSlot = false; Speedrun.LeaveSlot("co-op run not started"); return why; }
+            Speedrun.HoldSlot = false;
+            hostStarting = true;
+            AnnouncePlay(true);
+            Log("party: co-op speedrun (" + SrCategories.Label(cat) + ") started in my speedrun slot; " + (lobby.Members().Count - 1) + " other players follow");
+            return null;
+        }
+
+        // ---- ISrLink: the players as the speedrun messages see them ----
+
+        public ulong SrMyId { get { return myId; } }
+        public string SrMyName { get { return string.IsNullOrEmpty(myName) ? "YOU" : myName.ToUpper(); } }
+        public bool SrIsPartyHost { get { return lobby != null && lobby.InLobby && lobby.IsOwner; } }
+        public ulong SrPartyHostId { get { return HostIdNow(); } }
+        public List<ulong> SrOthers()
+        {
+            var l = new List<ulong>();
+            if (lobby == null || !lobby.InLobby) return l;
+            foreach (var p in peers) if (!p.IsBot && p.Connected && MayTalkTo(p) && lobby.IsMember(p.Id)) l.Add(p.Id);
+            return l;
+        }
+        public void SrSend(ulong to, byte[] m) { foreach (var p in peers) if (!p.IsBot && p.Id == to) { p.Link.SendReliable(m); return; } }
+        public float SrRttMs(ulong id) { foreach (var p in peers) if (p.Id == id) return Mathf.Clamp(p.RttLast, 0f, 2000f); return 0f; }
+        public string SrNameOf(ulong id) { foreach (var p in peers) if (p.Id == id) return p.Label.ToUpper(); return NameOf(id).ToUpper(); }
+        public void SrSetRaceKey(string v) { if (lobby != null && lobby.InLobby && lobby.IsOwner && lobby.Get("sr") != (v ?? "")) lobby.Set("sr", v ?? ""); }
+        public bool SrInMyWorld(ulong id) { foreach (var p in peers) if (p.Id == id) return InMyWorld(p); return false; }
 
         void AnnouncePlay(bool playing)
         {
@@ -1370,6 +1493,7 @@ namespace CoopMod
         // A member follows the leader in: guest saves first, then the leader's world is fetched and written as the save the game loads, then the game starts.
         void FollowLeader()
         {
+            if (Speedrun.SlotActive) return;
             if (following || hostStarting || lobby == null || !lobby.InLobby || lobby.IsOwner) return;
             if (joinOpen) { joinFromStart = false; CloseJoinBox(); }
             if (menuEvents != null) FreezeMenus(false);           // the join window had the menus paused: live again before a menu opens
@@ -1441,12 +1565,12 @@ namespace CoopMod
             if (atStart && !lobby.InLobby && WorldSync.GuestMode && !following) WorldSync.LeaveGuestMode();
             if (!lobby.InLobby || Time.realtimeSinceStartup < nextParty) return;
             nextParty = Time.realtimeSinceStartup + 0.5f;
-            if (lobby.IsOwner) AnnouncePlay(inWorld || hostStarting);
+            if (lobby.IsOwner) { if (!Speedrun.Isolated) AnnouncePlay(inWorld || hostStarting); }   // a race leader plays its own world: nobody follows into it
             else
             {
                 string play = lobby.Get("play");
                 if (inWorld) seenPlay = play;
-                else if (Party.ShouldFollow(atStart, false, lobby.MyAdmission() == 0, following || hostStarting, play, seenPlay)) FollowLeader();
+                else if (Party.ShouldFollow(atStart, false, lobby.MyAdmission() == 0, following || hostStarting, play, seenPlay) && !SrMsg.RaceBlocksFollow(lobby.Get("sr"))) FollowLeader();
             }
         }
 
@@ -1478,6 +1602,7 @@ namespace CoopMod
 
         void OnGUI()
         {
+            SpeedrunUI.Draw();      // the speedrun timer needs no Steam
             if (!Online) return;
             SaveCodeOnce();
             foreach (var p in peers) DrawMarker(p);
@@ -1606,8 +1731,19 @@ namespace CoopMod
             foreach (var w in clone.GetComponentsInChildren<WaterWadeSound>(true)) Destroy(w);
             foreach (var w in clone.GetComponentsInChildren<FallToDeath>(true)) Destroy(w);
             foreach (var w in clone.GetComponentsInChildren<PlayerOutOfBounds>(true)) Destroy(w);
-            foreach (var w in clone.GetComponentsInChildren<JetPack>(true)) Destroy(w);   // the copy's jetpack would talk to MY fuel meter (the HUD is shared): copies have none
+            // jetpack, flower, leaf and free-fall scripts are removed (they would use MY fuel meter, inventory, controller and walkster); RemoteFx shows their looks instead
+            p.Fx = RemoteFx.Attach(root, clone, walker);
             foreach (var w in clone.GetComponentsInChildren<CameraFocus>(true)) Destroy(w);   // the game camera frames every CameraFocus: copies must not pull it
+            // the rest of what still reached MY walkster from a copy:
+            foreach (var w in clone.GetComponentsInChildren<LandWatch>(true)) DestroyImmediate(w);              // my own landing/death announcer, copied with my BUD
+            foreach (var w in clone.GetComponentsInChildren<WaterDeath>(true)) Destroy(w);                      // drowning chunked the copy for good and rumbled my pad
+            foreach (var w in clone.GetComponentsInChildren<IdleVocalisation>(true)) Destroy(w);                // my idle time, my voice
+            foreach (var w in clone.GetComponentsInChildren<HintBase>(true)) Destroy(w);                        // hints on my HUD, "climbed" in my save
+            foreach (var w in clone.GetComponentsInChildren<HintManager>(true)) Destroy(w);
+            foreach (var w in clone.GetComponentsInChildren<DroneCameraAbility>(true)) Destroy(w);              // my voice, my camera
+            foreach (var w in clone.GetComponentsInChildren<CrystalLocatorAbility>(true)) Destroy(w);           // a second crystal message on my HUD, from my position
+            walker.m_immortal = true;            // a hard bump would cut my voice and count a death in my stats (RemoteDriver keeps it so)
+            walker.m_airPlayForceMul = 0f;       // after a leaf jump the game pushes the jumper with MY stick
             var driver = walker.gameObject.AddComponent<RemoteDriver>();
             driver.useKeyboard = !Online;
             driver.mirrorFrom = localWalker;
@@ -1618,6 +1754,11 @@ namespace CoopMod
                 driver.jumpCooldown = h0.m_jumpCooldown; driver.jumpFalloff = h0.m_jumpScaleFalloff;
             }
             p.Driver = driver;
+            var guard = clone.AddComponent<CloneGuard>();
+            guard.driver = driver;
+            guard.swappers = clone.GetComponentsInChildren<SkinSwapper>(true);
+            if (p.Fx != null) p.Fx.guard = guard;
+            p.FxIdKnown = false;
             p.CloneTsMap.Clear(); p.CloneRsMap.Clear(); p.VisLogged = false; p.LastAppliedSkin = -1;
             Log("spawned copy of " + p.Label + " at " + pos);
         }

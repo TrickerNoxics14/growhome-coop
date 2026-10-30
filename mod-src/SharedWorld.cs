@@ -15,6 +15,7 @@ namespace CoopMod
     {
         const byte MsgPlant = 4, MsgShard = 5, MsgIsland = 6, MsgTeleporter = 8;
         const byte MsgPlant2 = 12;           // a plant with its number: [12][id][sender][number][echo of: player u64][echo of: their number i32][the rest as MsgPlant]
+        public const byte MsgPickup = 13;    // a flower or leaf pickup was taken: [13][type][x][y][z], always 14 bytes
 
         // ---- the leader's plant is the real one ----
         // In a party the leader numbers every plant it sends. A guest builds on the number it last got from the leader and sends it along; the
@@ -100,7 +101,7 @@ namespace CoopMod
         public static bool QuietRejects;                      // set by the fuzz test, which sends hundreds of bad messages on purpose: keeps the log readable
         public static bool TestFailInPlaceOnce;               // fault injection: the next in-place plant update fails, so the rebuild path is exercised
 
-        public static bool IsMessage(byte[] m) { return m != null && m.Length > 0 && (m[0] == MsgPlant || m[0] == MsgPlant2 || m[0] == MsgShard || m[0] == MsgIsland || m[0] == MsgTeleporter); }
+        public static bool IsMessage(byte[] m) { return m != null && m.Length > 0 && (m[0] == MsgPlant || m[0] == MsgPlant2 || m[0] == MsgShard || m[0] == MsgIsland || m[0] == MsgTeleporter || m[0] == MsgPickup); }
 
         // After the whole world was replaced (join): forget what I knew and give things a few seconds to settle.
         public static void Rebaseline() { quietUntil = Time.time + 6f; teleKnown.Clear(); teleSeen = false; lastSig.Clear(); dirty.Clear(); owner.Clear(); lastIslandCount = -1; attachedIds.Clear(); plantNumber.Clear(); forced.Clear(); waiting.Clear(); ForgetEchoes(); }
@@ -144,6 +145,87 @@ namespace CoopMod
             if (hooked) return;
             hooked = true;
             JointShard.m_onShardRemoval = (JointShard.OnShardRemoval)Delegate.Combine(JointShard.m_onShardRemoval, new JointShard.OnShardRemoval(OnLocalShardCollected));
+            // fires only when a pickup really went into my inventory (not on a grab that was let go), just before the pickup is removed
+            ParachutePickup.m_flyablePickedUpObjectDelegate = (ParachutePickup.FlyablePickedUpObject)Delegate.Combine(ParachutePickup.m_flyablePickedUpObjectDelegate, new ParachutePickup.FlyablePickedUpObject(OnLocalPickup));
+        }
+
+        // ---- flower and leaf pickups -------------------------------------------------------------------------------------------------
+        // A flower (parachute) or leaf (glider) I take disappears for everybody too. Pickups come back after a while (Respawn) at their first
+        // spot but in another place in the hierarchy, so they are known by their type and that spot, not by their path.
+
+        static readonly FieldInfo respawnObjectField = typeof(Respawn).GetField("m_respawnObject", BindingFlags.NonPublic | BindingFlags.Instance);
+        public static int StatPickupsApplied;
+
+        // where a pickup first stood: the waiting respawn copy sits there; otherwise where it is now
+        static Vector3 PickupSpot(GameObject go)
+        {
+            var rs = go.GetComponent<Respawn>();
+            if (rs != null && respawnObjectField != null)
+            {
+                var spot = respawnObjectField.GetValue(rs) as GameObject;
+                if (spot != null) return spot.transform.position;
+            }
+            return go.transform.position;
+        }
+
+        static void OnLocalPickup(FlyableManager.PickupItem type, GameObject go)
+        {
+            if (applying || !Enabled || go == null) return;
+            if (type != FlyableManager.PickupItem.Parachute && type != FlyableManager.PickupItem.Glider) return;
+            if (go.name.EndsWith(" Pickup")) return;          // a leaf somebody dropped: it exists only on that PC, so it must not remove a real one near it
+            Vector3 at = PickupSpot(go);
+            outbox.Add(PickupMessage(type, at));
+            CoopBehaviour.Log("shared: I took a " + (type == FlyableManager.PickupItem.Glider ? "leaf" : "flower") + " at " + at);
+        }
+
+        static byte[] PickupMessage(FlyableManager.PickupItem type, Vector3 at)
+        {
+            var ms = new MemoryStream(); var w = new BinaryWriter(ms);
+            w.Write(MsgPickup); w.Write((byte)type); w.Write(at.x); w.Write(at.y); w.Write(at.z);
+            return ms.ToArray();
+        }
+
+        public static byte[] TestPickupMessage(FlyableManager.PickupItem type, Vector3 at) { return PickupMessage(type, at); }
+        public static Vector3 TestPickupSpot(GameObject go) { return PickupSpot(go); }
+
+        // A friend took this flower/leaf: it shrinks away here and grows back like after my own take. It never goes into MY inventory:
+        // the game's own grab and shrink callbacks (which add it to the local player) are never called, and the pickup script is removed first.
+        static void ApplyPickup(byte[] m)
+        {
+            if (m.Length != 14) throw new FormatException("bad pickup message");
+            var type = (FlyableManager.PickupItem)m[1];
+            if (type != FlyableManager.PickupItem.Parachute && type != FlyableManager.PickupItem.Glider) throw new FormatException("bad pickup type");
+            var at = new Vector3(BitConverter.ToSingle(m, 2), BitConverter.ToSingle(m, 6), BitConverter.ToSingle(m, 10));
+            for (int i = 0; i < 3; i++) if (float.IsNaN(at[i]) || float.IsInfinity(at[i]) || Math.Abs(at[i]) > 50000f) throw new FormatException("bad pickup position");
+            string what = type == FlyableManager.PickupItem.Glider ? "leaf" : "flower";
+            ParachutePickup best = null; float bestD = 3f;
+            foreach (ParachutePickup pk in UnityEngine.Object.FindObjectsOfType(typeof(ParachutePickup)))
+            {
+                if (pk == null || pk.m_parachuteType != type || pk.name.EndsWith(" Pickup")) continue;
+                if (pk.transform.root.name.StartsWith("Walkster")) continue;
+                float d = Mathf.Min((pk.transform.position - at).magnitude, (PickupSpot(pk.gameObject) - at).magnitude);
+                if (d <= bestD) { best = pk; bestD = d; }
+            }
+            if (best == null) { CoopBehaviour.Log("shared: a friend took a " + what + " at " + at + "; not here (already gone or moved)"); return; }
+            // already shrinking: I am taking that same one here, so leave it (and never pick a different one near it instead)
+            if (best.GetComponent<ShrinkAndDestroy>() != null) { CoopBehaviour.Log("shared: a friend took the " + what + " " + best.name + " at " + at + "; already being taken here"); return; }
+            applying = true;
+            try
+            {
+                var go = best.gameObject;
+                float destroyTime = best.m_destroyTime; var curve = best.m_animCurve;
+                if (go.rigidbody != null) { go.rigidbody.isKinematic = true; go.rigidbody.useGravity = false; }   // kinematic: ObjectSync leaves it alone too
+                foreach (var c in go.GetComponentsInChildren<Collider>()) c.enabled = false;
+                var rs = go.GetComponent<Respawn>();
+                if (rs != null) rs.StartRespawn();                // grows back here as well
+                UnityEngine.Object.Destroy(best);                  // my hand can no longer take it into my inventory
+                var sd = go.AddComponent<ShrinkAndDestroy>();       // the same shrink the game uses, without the callback that gives the item away
+                sd.m_destroyDelay = 0f; sd.m_useDestroySize = false; sd.m_useDestroyTime = true; sd.m_destroyTime = destroyTime; sd.m_animCurve = curve;
+                StatPickupsApplied++;
+                Status = "a friend took a " + what; CoopUI.Toast("A FRIEND TOOK A " + what.ToUpper());
+                CoopBehaviour.Log("shared: a friend took the " + what + " " + go.name + " at " + at);
+            }
+            finally { applying = false; }
         }
 
         static void OnLocalShardCollected(JointShard shard, string guid)
@@ -790,6 +872,7 @@ namespace CoopMod
                 else if (msg[0] == MsgPlant || msg[0] == MsgPlant2) ApplyPlant(msg, from);
                 else if (msg[0] == MsgIsland) ApplyIsland(msg, from);
                 else if (msg[0] == MsgTeleporter) ApplyTeleporter(msg);
+                else if (msg[0] == MsgPickup) ApplyPickup(msg);
             }
             catch (Exception e) { StatRejected++; if (!QuietRejects) CoopBehaviour.Log("shared: rejected a bad message (" + Short(e) + ")"); }
         }

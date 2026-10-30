@@ -14,6 +14,7 @@ namespace CoopMod
         public static readonly Color Panel = new Color(0.02f, 0.08f, 0.18f, 0.80f);
 
         public static bool Hidden;
+        public static bool ShownForTest;      // the self test needs the display on, whatever the player chose with F1
 
         static bool built;
         static Font font;
@@ -21,6 +22,8 @@ namespace CoopMod
         static GUIStyle field;
 
         static float S { get { return Mathf.Max(0.8f, Screen.height / 720f); } }
+        public static float Scale { get { return S; } }
+        public static float ScaleFor(float screenHeight) { return Mathf.Max(0.8f, screenHeight / 720f); }
 
         static void Build()
         {

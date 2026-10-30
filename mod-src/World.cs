@@ -139,7 +139,7 @@ namespace CoopMod
         {
             try
             {
-                if (GuestMode || SaveGuard.Root == null || (!force && Time.realtimeSinceStartup - lastBackup < 300f)) return null;
+                if (GuestMode || Speedrun.SlotActive || SaveGuard.Root == null || (!force && Time.realtimeSinceStartup - lastBackup < 300f)) return null;
                 string level = Application.loadedLevelName, file = Path.Combine(SaveSystem.m_levelFilesPath, level + ".sav");
                 if (!File.Exists(file)) return null;
                 string dir = into ?? Path.Combine(SaveGuard.Root, "backups");
@@ -160,6 +160,7 @@ namespace CoopMod
         public static void EnterGuestMode()
         {
             if (GuestMode) return;
+            if (Speedrun.SlotActive) { CoopBehaviour.Log("guest mode refused: a speedrun uses its own save slot"); return; }   // no other world while the saves point at the slot
             // every step first, guest mode last: if anything fails the saves stay where they were and no world from anybody is accepted (GuestPathsActive)
             try
             {
@@ -305,6 +306,7 @@ namespace CoopMod
         // Call every frame: applies a snapshot that arrived while BUD was inactive, answers a request that came too early, retries a request that got no answer.
         public static void Tick()
         {
+            if (Speedrun.Isolated) { waiters.Clear(); pending = null; requestedAt = -1f; return; }   // a race: my world is never sent, nobody else's is taken
             bool inWorld = InWorld();
             if (waiters.Count > 0 && inWorld) { var all = new List<ITransport>(waiters); waiters.Clear(); foreach (var w in all) Handle(w, new byte[] { MsgRequest }); }
             if (requestedAt > 0f && !Preloading && !Receiving && Time.realtimeSinceStartup - requestedAt > 10f)   // while following the leader in, the follow asks by itself; never while a world is coming in
@@ -320,12 +322,14 @@ namespace CoopMod
         // Send my current world to the peer, who loads it (the opposite direction of Request).
         public static void Push(ITransport net)
         {
+            if (Speedrun.Isolated) return;
             try { SendSnapshot(net); }
             catch (Exception e) { Status = "push error: " + e.GetType().Name; CoopBehaviour.Log("world: push error " + e); }
         }
 
         public static void Request(ITransport net)
         {
+            if (Speedrun.Isolated) return;
             if (requestedAt < 0f) retries = 0;
             requestedAt = Time.realtimeSinceStartup; requestTarget = net;
             net.SendReliable(new byte[] { MsgRequest });
@@ -508,6 +512,7 @@ namespace CoopMod
         {
             if (net == null) return;
             if (!Enabled) return;
+            if (Speedrun.SlotActive) return;
             if (!connected) { initialized = false; return; }
             if (Time.time < nextCheck) return;
             nextCheck = Time.time + 0.5f;

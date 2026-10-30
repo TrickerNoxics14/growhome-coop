@@ -9,6 +9,7 @@ namespace CoopMod
         public bool jumpDown, jumpUp, leftGrab, rightGrab;
         public Vector3 camForward = Vector3.forward;
         public float jumpScale;
+        public bool airAbility;          // jetpack, flower or leaf in use: the copy has no lift of its own, so it follows the real height
     }
 
     // Applies RemoteInput through the same fields ExploreInputHandler writes for the local player.
@@ -31,12 +32,76 @@ namespace CoopMod
         bool expectingRelease;
         bool jumpPressed, jumpReleased;
         public float maxSpeed = 8f, accScale = 2f, jumpCooldown = 1f, lookRate = 6f;
+        // the jump is not started from Update: it is queued and started inside one physics step that JumpWindow guards (see JumpSteps)
+        bool jumpQueued, windowOpen;
+        float jumpQueuedAt, windowOpenedAt;
+        public bool LastJumpUsed;                // the game's jump code used the last guarded jump (false: it was cleared unused)
+        public bool wakeForTest;                 // self test: keep the game's out-of-sight sleep off for the guarded step
+        static readonly System.Reflection.FieldInfo InhibitField = typeof(BipedWalkScript).GetField("m_distanceDisabledInhibit", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        AudioSource voice;
+        bool voiceMissingLogged;
+        public AudioSource Voice { get { return voice; } }
 
         void Start()
         {
             c = GetComponent<Controllable>();
             hands = GetComponent<BipedHandsScript>();
             look.SetTrackingRate(lookRate);
+            var t = transform.FindChild("AudioSources/Voice");
+            voice = t != null ? t.audio : null;
+            if (voice == null)
+            {
+                // no voice of its own: a silent one, so a copy's line can never fall back to mine
+                var g = new GameObject("CoopVoice");
+                g.transform.parent = transform; g.transform.localPosition = Vector3.zero;
+                voice = g.AddComponent<AudioSource>(); voice.volume = 0f;
+            }
+        }
+
+        // Coroutines stop while the copy is switched off (dead, or saved from the chunker): start again each time it comes back.
+        void OnEnable() { StartCoroutine(JumpSteps()); }
+        void OnDisable() { if (windowOpen) CloseWindow(); }
+        void OnDestroy() { if (windowOpen) CloseWindow(); }
+
+        public void QueueJumpForTest() { jumpQueued = true; jumpQueuedAt = Time.time; }
+
+        // WaitForFixedUpdate resumes after every physics step. A jump set there is used by the copy's walk script in the very next step, whatever
+        // order the scripts run in, and the next resume closes the window again: the swap never lasts more than that one step.
+        System.Collections.IEnumerator JumpSteps()
+        {
+            var wait = new WaitForFixedUpdate();
+            while (true)
+            {
+                yield return wait;
+                if (windowOpen) CloseWindow();
+                if (!jumpQueued || c == null) continue;
+                if (Time.time - jumpQueuedAt > 0.3f) { jumpQueued = false; continue; }   // waited too long behind another copy: dropped
+                if (JumpWindow.Owner != null) continue;                                    // another copy jumps in this step: next one
+                jumpQueued = false;
+                var w = c as BipedWalkScript;
+                if (!JumpWindow.Open(this, voice, w))
+                {
+                    if (!voiceMissingLogged) { voiceMissingLogged = true; CoopBehaviour.Log("copy jump: the game's voice field was not found; copies jump without the jump animation so my voice is never used"); }
+                    continue;
+                }
+                windowOpen = true; windowOpenedAt = Time.realtimeSinceStartup;
+                if (wakeForTest && InhibitField != null) InhibitField.SetValue(w, true);
+                c.m_TriggerJump = true;
+            }
+        }
+
+        void CloseWindow()
+        {
+            windowOpen = false;
+            JumpWindow.Close();
+            LastJumpUsed = c == null || !c.m_TriggerJump;
+            if (c != null && c.m_TriggerJump) { c.m_TriggerJump = false; JumpWindow.Unconsumed++; }   // not used in its step (the copy was asleep or could not jump): never later, outside the guard
+        }
+
+        void LateUpdate()
+        {
+            if (windowOpen && Time.realtimeSinceStartup - windowOpenedAt > 0.25f) CloseWindow();   // no physics step came (the game stood still)
+            if (Time.time < JumpWindow.MuteRumbleUntil) { try { XInput.SetVibration(0, 0f, 0f); } catch (System.Exception) { } }   // the copy's leaf jump rumbled MY pad
         }
 
         // Local test source: IJKL move, U jump, N/M left/right grab (all relative to the main camera).
@@ -63,7 +128,8 @@ namespace CoopMod
             float horiz = err.magnitude;
             // Vertical catch-up: the peer is climbing or jumping and the input-driven walk cannot follow a rock face on its own.
             bool grabbing = input.leftGrab || input.rightGrab || (hands != null && hands.IsClimbing());
-            bool followY = grabbing || Mathf.Abs(full.y) > 2f;
+            bool flying = input.airAbility && Time.time - netTime < RemoteFx.Timeout;   // stale news: back to normal walking
+            bool followY = grabbing || flying || Mathf.Abs(full.y) > 2f;
             if (horiz < 0.3f && !(followY && Mathf.Abs(full.y) > 0.3f)) return;
             Vector3 v = c.body.velocity;
             Vector3 want = netVel + Vector3.ClampMagnitude(err * 6f, 12f); want.y = 0f;
@@ -82,6 +148,9 @@ namespace CoopMod
         {
             if (c == null) return;
             if (mirrorFrom != null) c.jumpEnabled = mirrorFrom.jumpEnabled;
+            // a hard bump must not "kill" the copy: the game would cut MY voice line and count a death in MY stats (BipedWalkScript.HandleCollision)
+            var bw = c as BipedWalkScript;
+            if (bw != null && !bw.m_immortal) bw.m_immortal = true;
             if (useKeyboard) ReadKeyboard();
             Jump();
             if (hasNet) c.m_JumpScale = input.jumpScale; // sender's real jump strength: the game's own jump timing depends on frame rate
@@ -183,7 +252,7 @@ namespace CoopMod
                     jumpCooldownTime = jumpCooldown;
                     jumpTime = 0f;
                     c.m_OffGroundTime = jumpCooldown;
-                    c.m_TriggerJump = true;
+                    jumpQueued = true; jumpQueuedAt = Time.time;   // started in the next guarded physics step (JumpSteps), never from here
                     c.m_JumpScale = 1f;
                     Vector3 f = Vector3.ProjectOnPlane(input.camForward, Vector3.up).normalized;
                     c.m_JumpDirection = Vector3.Cross(Vector3.up, f) * input.move.x + f * input.move.y;
