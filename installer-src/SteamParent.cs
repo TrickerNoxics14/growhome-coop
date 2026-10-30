@@ -46,7 +46,10 @@ static partial class Program
         IntPtr steamHandle = IntPtr.Zero, list = IntPtr.Zero, parentBox = IntPtr.Zero, envPtr = IntPtr.Zero;
         try
         {
-            var steam = Process.GetProcessesByName("steam").FirstOrDefault();
+            // the steam.exe that is signed in (Steam writes its pid), else the oldest one
+            var all = Process.GetProcessesByName("steam");
+            int active = ActiveSteamPid();
+            var steam = all.FirstOrDefault(p => p.Id == active) ?? all.OrderBy(p => { try { return p.StartTime; } catch { return DateTime.MaxValue; } }).FirstOrDefault();
             if (steam == null) return 0;
             steamHandle = OpenProcess(0x0080, false, steam.Id);        // PROCESS_CREATE_PROCESS
             if (steamHandle == IntPtr.Zero) return 0;

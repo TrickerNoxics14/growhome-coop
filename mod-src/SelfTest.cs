@@ -117,11 +117,84 @@ namespace CoopMod
         void Check(string id, string what, bool ok, string detail)
         {
             if (ok) pass++; else fail++;
+            reportedIds.Add(id);
             string line = "CHECK " + id + " " + (ok ? "PASS" : "FAIL") + " " + what + (string.IsNullOrEmpty(detail) ? "" : " - " + detail);
             Log(line); report.AppendLine(line);
         }
 
         void Note(string text) { Log(text); report.AppendLine("NOTE " + text); }
+
+        // ---- hollow-pass guards -------------------------------------------------------------------------------------------------------
+        // A section that stops half way (an exception, or a yield break before its last check) or a network sender a test relied on whose
+        // sequence never moved must FAIL, not leave the checks it did report looking like a pass. Every live section runs through Section():
+        // it writes SECTION <name> BEGIN/END lines (run-audit.ps1 reads them too) and HOLLOW-PASS at the end fails on anything left open.
+        readonly List<string> hollowProblems = new List<string>();
+        readonly List<string> openSections = new List<string>();
+        readonly List<string> reportedIds = new List<string>();
+        int sectionsRun, sendersSeen;
+        bool scenarioComplete;
+
+        IEnumerator Section(string name, string mustReport, IEnumerator body)
+        {
+            bool mayBeEmpty = mustReport == "?"; if (mayBeEmpty) mustReport = null;      // "?": the save may lack what it tests (it then only notes that)
+            sectionsRun++; openSections.Add(name);
+            int checksBefore = pass + fail, idsBefore = reportedIds.Count;
+            report.AppendLine("SECTION " + name + " BEGIN");
+            while (true)
+            {
+                object current;
+                try
+                {
+                    if (!body.MoveNext()) break;
+                    current = body.Current;
+                }
+                catch (Exception e)
+                {
+                    hollowProblems.Add("section " + name + " stopped half way: " + Describe(e));
+                    report.AppendLine("SECTION " + name + " ABORTED " + e.GetType().Name);
+                    yield break;          // stays open: HOLLOW-PASS fails
+                }
+                yield return current;
+            }
+            int n = pass + fail - checksBefore;
+            if (n == 0 && !mayBeEmpty) hollowProblems.Add("section " + name + " ended without reporting a single check");
+            if (!string.IsNullOrEmpty(mustReport))
+                foreach (var id in mustReport.Split(','))
+                {
+                    bool seen = false;
+                    for (int i = idsBefore; i < reportedIds.Count; i++) if (reportedIds[i] == id) { seen = true; break; }
+                    if (!seen) hollowProblems.Add("section " + name + " ended before it reported " + id);
+                }
+            openSections.Remove(name);
+            report.AppendLine("SECTION " + name + " END " + n);
+        }
+
+        // A network sender a check relied on: its sequence must have moved from first to last, or that check proved nothing.
+        void Sender(string name, uint first, uint last)
+        {
+            sendersSeen++;
+            string line = "SENDER " + name.Replace(' ', '_') + " " + first + " " + last;
+            report.AppendLine(line); Log(line);
+            if (last <= first) hollowProblems.Add("the sender " + name + " never advanced (" + first + " -> " + last + ")");
+        }
+
+        void CheckGuards()
+        {
+            var problems = new List<string>(hollowProblems);
+            foreach (var s in openSections) problems.Add("section " + s + " never ended");
+            if (!scenarioComplete) problems.Add("the scenario stopped before its end");
+            Check("HOLLOW-PASS", "every test section ran to its end and reported what it must, the scenario reached its end, and every network sender a test relied on really advanced its sequence",
+                problems.Count == 0, sectionsRun + " sections, " + sendersSeen + " senders" + (problems.Count > 0 ? ": " + string.Join(" | ", problems.ToArray()) : ""));
+
+            // QuitGuard's counters in the log about once a minute: always there, never spam
+            float span = QuitGuard.FirstStatusAt < 0f ? 0f : Time.realtimeSinceStartup - QuitGuard.FirstStatusAt;
+            string log = ReadShared(Here("coopmod-steam.log")); int lines = 0, at = 0;
+            while ((at = log.IndexOf("quit guard: counters quit=", at, StringComparison.Ordinal)) >= 0) { lines++; at++; }
+            int n = QuitGuard.StatusLogs;
+            bool ok = n >= 1 && lines >= 1 && lines <= n && (n < 2 || QuitGuard.StatusMinGap >= QuitGuard.StatusEvery - 5f) && n <= span / (QuitGuard.StatusEvery - 5f) + 1.5f && (span < QuitGuard.StatusEvery + 5f || n >= 2);
+            Check("QUIT-GUARD-LOG", "the quit guard logs its counters (quit, pause, repairs, given back) about once a minute: from the start, regularly, never more often",
+                ok, n + " counter lines (" + lines + " in the log) over " + span.ToString("F0") + " s, closest two " + (n < 2 ? "-" : QuitGuard.StatusMinGap.ToString("F0") + " s"));
+        }
 
         void Warn(string what, string detail)
         {
@@ -755,6 +828,11 @@ namespace CoopMod
             r = MessageGate.Classify(big, true); Check("GATE-ROUTING", "gate: an oversized snapshot is refused even from the host", r == Route.Oversized, r.ToString());
             var pick = new byte[14]; pick[0] = SharedWorld.MsgPickup;
             r = MessageGate.Classify(pick, false); Check("GATE-ROUTING", "gate: a taken flower/leaf from any player is accepted", r == Route.Shared, r.ToString());
+            byte[] grow = null; try { foreach (PlantRoot pr in UnityEngine.Object.FindObjectsOfType(typeof(PlantRoot))) if (SharedWorld.PlantId(pr) != null) { grow = SharedWorld.TestGrowMessage(SharedWorld.GrowStart, pr, Friend, 3); break; } } catch (Exception) { }
+            if (grow == null) grow = new byte[20]; grow[0] = SharedWorld.MsgGrow;
+            var growBig = new byte[101]; growBig[0] = SharedWorld.MsgGrow;
+            Route rg = MessageGate.Classify(grow, false), rgBig = MessageGate.Classify(growBig, false);
+            Check("GATE-ROUTING", "gate: a vine start from any player is accepted, an oversized one is refused", rg == Route.Shared && rgBig == Route.Ignore, rg + " / " + rgBig);
         }
 
         // ---- save safety -------------------------------------------------------------------------------------------------------------
@@ -811,6 +889,14 @@ namespace CoopMod
             if (On("party")) try { CheckLeaderSave(); } catch (Exception e) { Check("WORLD-PARTS", "world part checks ran", false, Describe(e)); }
             if (On("speedrun")) try { CheckSpeedrunPure(); } catch (Exception e) { Check("AUDIT-ERROR", "speedrun checks ran", false, Describe(e)); }
             if (On("speedrun,net,party")) try { CheckSpeedrunNetPure(); } catch (Exception e) { Check("AUDIT-ERROR", "race and co-op run checks ran", false, Describe(e)); }
+            if (On("party,session")) Try("LEADER-LEFT", "leader-left checks ran", CheckLeaderWatch);
+            if (On("party,session")) Try("LEADER-BEAT", "leader beat checks ran", CheckLeaderBeat);
+            if (On("movement,net")) Try("MOVE-WIRE", "motion block checks ran", CheckMotionWire);
+            if (On("movement")) Try("MOVE-BUFFER", "path buffer checks ran", CheckMotionBuffer);
+            if (On("movement")) Try("MOVE-SESSION", "restarted sender checks ran", CheckMotionSession);
+            if (On("movement")) Try("MOVE-SIM", "scripted path checks ran", CheckMotionSim);
+            if (On("story,net")) Try("CS-WIRE", "story message checks ran", CheckStoryPure);
+            if (On("creatures,net")) Try("CREATURE-WIRE", "creature message checks ran", CheckCreaturePure);
 
             float begin = Time.realtimeSinceStartup;
             bool pressed = false, partyTested = !On("party"), srTested = !On("speedrun"); float menuAt = -1f;
@@ -827,14 +913,14 @@ namespace CoopMod
                     {
                         // the party lobby lives on the start screen: test it there, before the game starts
                         partyTested = true;
-                        yield return StartCoroutine(TestPartyMenu());
+                        yield return StartCoroutine(Section("party-menu", null, TestPartyMenu()));
                         if (CoopMenu.Menu != null && CoopMenu.Menu.gameObject.activeInHierarchy) CoopMenu.Menu.Close();
                     }
                     else if (Time.realtimeSinceStartup - menuAt > 2f && !srTested)
                     {
                         // speedruns start from the start screen: two runs in the speedrun save slot before the audit's own game
                         srTested = true;
-                        yield return StartCoroutine(TestSpeedrunLive());
+                        yield return StartCoroutine(Section("speedrun-live", null, TestSpeedrunLive()));
                         if (CoopMenu.Menu != null && CoopMenu.Menu.gameObject.activeInHierarchy) CoopMenu.Menu.Close();
                     }
                     else if (Time.realtimeSinceStartup - menuAt > 2f)
@@ -849,7 +935,7 @@ namespace CoopMod
                 yield return null;
             }
             Log("in the world after " + (Time.realtimeSinceStartup - begin).ToString("F0") + " s; letting things settle");
-            if (!On("world,plants,net,ui,clone,fx")) { Note("quick audit: no in-world group chosen; stopping in the world"); Finish(); yield break; }
+            if (!On("world,plants,net,ui,clone,fx,session,movement,story,creatures")) { Note("quick audit: no in-world group chosen; stopping in the world"); scenarioComplete = true; Note("scenario complete: every chosen section ran"); Finish(); yield break; }
             yield return new WaitForSeconds(20f);     // fixed on purpose: nothing observable says the world has settled
 
             if (SharedWorld.MyId == 0UL) SharedWorld.MyId = 1UL;
@@ -862,10 +948,11 @@ namespace CoopMod
             if (On("ui"))
             {
                 bool displayWasHidden = CoopUI.Hidden; CoopUI.ShownForTest = true; CoopUI.Hidden = false;     // the player may have hidden the co-op display (F1): the messages are tested with it on
-                yield return StartCoroutine(TestHudMessages());
+                yield return StartCoroutine(Section("hud-messages", "HUD-MSG", TestHudMessages()));
                 CoopUI.ShownForTest = false; CoopUI.Hidden = displayWasHidden;
-                yield return StartCoroutine(TestCoopMenu());
+                yield return StartCoroutine(Section("coop-menu", "COOP-MENU", TestCoopMenu()));
             }
+            if (On("ui,session")) yield return StartCoroutine(Section("pause-rows", "PAUSE-ROWS,QUIT-GUARD,QUIT-DOOMED", TestPauseRows()));
 
             var roots = new List<PlantRoot>();
             foreach (PlantRoot r in UnityEngine.Object.FindObjectsOfType(typeof(PlantRoot))) if (SharedWorld.PlantId(r) != null) roots.Add(r);
@@ -880,22 +967,37 @@ namespace CoopMod
                 {
                     if (r == null) continue;
                     if (!r.IsTrunk() && ++others > 2) break;
-                    yield return StartCoroutine(TestPlant(r, r.IsTrunk() ? "trunk" : "plant " + others, quick ? 8 : (r.IsTrunk() ? 25 : 10), !faultTested));
+                    yield return StartCoroutine(Section("plant " + SharedWorld.PlantId(r), null, TestPlant(r, r.IsTrunk() ? "trunk" : "plant " + others, quick ? 8 : (r.IsTrunk() ? 25 : 10), !faultTested)));
                     tested++;
-                    if (r != null && r.IsTrunk() && tested == 1) yield return StartCoroutine(TestIsland(r));
+                    if (r != null && r.IsTrunk() && tested == 1) yield return StartCoroutine(Section("island", null, TestIsland(r)));
                     if (r != null && r.IsTrunk() && tested == 1) TestPlantLeader(r);
+                    if (r != null && tested == 1)
+                    {
+                        // vines in a party (SelfTestPlants.cs)
+                        try { CheckOnPlantBody(r); } catch (Exception e) { Check("PLANT-ONPLANT-BODY", "the check ran", false, Describe(e)); }
+                        yield return StartCoroutine(Section("grow-lease", null, TestGrowLease(r)));
+                        if (r != null) yield return StartCoroutine(Section("grow-guest", null, TestGrowGuest(r)));
+                        if (r != null) yield return StartCoroutine(Section("plant-colliders", "PLANT-COLLIDERS", TestPlantColliders(r)));
+                    }
                     if (quick) break;
                 }
                 Check("PLANT-SEND", "at least one plant was tested", tested > 0, tested + " plants");
             }
 
-            if (On("world")) yield return StartCoroutine(TestCrystals());
-            if (On("world")) yield return StartCoroutine(TestPickups());
-            if (On("world")) yield return StartCoroutine(TestTeleporters());
-            if (On("clone,fx")) yield return StartCoroutine(TestRemoteCopy());
-            if (On("world")) yield return StartCoroutine(TestWatchdog());
-            if (On("net")) yield return StartCoroutine(TestFuzz(roots));
+            if (On("story")) yield return StartCoroutine(Section("story-live", null, TestStoryLive()));          // cutscenes and story flags (SelfTestStory.cs)
+            if (On("creatures")) yield return StartCoroutine(Section("creatures-live", null, TestCreaturesLive()));   // sheep, dodos, glo worms and venus traps (SelfTestCreatures.cs)
+            if (On("world")) yield return StartCoroutine(Section("crystals", "CRYSTAL-SYNC", TestCrystals()));
+            if (On("world")) yield return StartCoroutine(Section("pickups", "?", TestPickups()));
+            if (On("world")) yield return StartCoroutine(Section("teleporters", "TELEPORTER-SYNC", TestTeleporters()));
+            if (On("clone,fx")) yield return StartCoroutine(Section("remote-copy", null, TestRemoteCopy()));
+            if (On("movement")) yield return StartCoroutine(Section("movement-live", "MOVE-FAR,MOVE-NEAR", TestMovementLive()));
+            if (On("world")) yield return StartCoroutine(Section("watchdog", "WATCHDOG", TestWatchdog()));
+            if (On("world,session")) yield return StartCoroutine(Section("hang-guard", "HANG-GUARD", TestHangGuard()));
+            if (On("net")) yield return StartCoroutine(Section("fuzz", "MSG-FUZZ", TestFuzz(roots)));
+            if (On("party,session")) yield return StartCoroutine(Section("leader-beat-live", "LEADER-BEAT", TestLeaderBeatLive()));   // as the leader of my own world: before the guest isolation, which stays in guest mode
             if (On("world")) try { CheckGuestIsolation(); } catch (Exception e) { Check("AUDIT-ERROR", "guest isolation checks ran", false, Describe(e)); }
+            if (On("party,session")) yield return StartCoroutine(Section("leader-left-live", "LEADER-LEFT,LEADER-BEAT,LEADER-LEFT-SAVE", TestLeaderLeftLive()));     // the last step: it ends on the start screen
+            scenarioComplete = true; Note("scenario complete: every chosen section ran");
             Finish();
         }
 
@@ -1056,7 +1158,7 @@ namespace CoopMod
             try
             {
                 // I lead: my trunk has number 5 (all messages go through Handle, as they come in from the network)
-                SharedWorld.LeaderId = me; SharedWorld.ClearForcedForTest(); SharedWorld.SetPlantNumberForTest(id, 5); SharedWorld.MarkSeenForTest(trunk);
+                SharedWorld.LeaderId = me; SharedWorld.ClearForcedForTest(); SharedWorld.ClearGrowthForTest(); SharedWorld.SetPlantNumberForTest(id, 5); SharedWorld.MarkSeenForTest(trunk);
                 int applied0 = SharedWorld.StatApplied, stale0 = SharedWorld.StatStale;
                 Try("PLANT-LEADER", "a guest's trunk built on copy 4", delegate { SharedWorld.Handle(SharedWorld.TestNumberedMessage(trunk, Friend, raw, 4), Friend); });
                 bool refused = SharedWorld.StatApplied == applied0 && SharedWorld.StatStale == stale0 + 1 && SharedWorld.ForcedForTest(id);
@@ -2498,6 +2600,7 @@ namespace CoopMod
             if (finished) return;
             finished = true;
             SharedWorld.TestSink = null;
+            try { CheckGuards(); } catch (Exception e) { Check("HOLLOW-PASS", "the end-of-run guards ran", false, Describe(e)); }
             string result = "RESULT pass=" + pass + " fail=" + fail + " warn=" + warn;
             Log(result);
             try

@@ -18,8 +18,19 @@ static partial class Program
 
     static void Check(string id, bool ok, string what, string detail)
     {
-        if (!ok) auditFails++;
-        auditLines.Add("CHECK " + id + " " + (ok ? "PASS" : "FAIL") + " " + what + (string.IsNullOrEmpty(detail) ? "" : " - " + detail));
+        lock (auditLines)
+        {
+            if (!ok) auditFails++;
+            auditLines.Add("CHECK " + id + " " + (ok ? "PASS" : "FAIL") + " " + what + (string.IsNullOrEmpty(detail) ? "" : " - " + detail));
+        }
+    }
+
+    static void WriteAuditOut()
+    {
+        string text;
+        lock (auditLines) text = string.Join("\r\n", auditLines.ToArray()) + "\r\nRESULT fail=" + auditFails + "\r\nDONE\r\n";
+        File.WriteAllText(auditOut ?? "audit-exe-result.txt", text);
+        Console.WriteLine(text);
     }
 
     static int Audit()
@@ -38,11 +49,12 @@ static partial class Program
         try { AuditDirectMarker(tmp); } catch (Exception e) { Check("AUDIT-ERROR", false, "the direct-start marker check ran to the end", e.GetType().Name + ": " + e.Message); }
         try { AuditStartUnderSteam(tmp); } catch (Exception e) { Check("AUDIT-ERROR", false, "the start-under-steam check ran to the end", e.GetType().Name + ": " + e.Message); }
         try { AuditStartMode(); } catch (Exception e) { Check("AUDIT-ERROR", false, "the start-mode checks ran to the end", e.GetType().Name + ": " + e.Message); }
+        try { AuditSafety(tmp); } catch (Exception e) { Check("AUDIT-ERROR", false, "the start-safety checks ran to the end", e.GetType().Name + ": " + e.Message + " " + (e.StackTrace ?? "").Split((char)10)[0].Trim()); }
+        try { AuditHarden(tmp); } catch (Exception e) { Check("AUDIT-ERROR", false, "the hardening checks (steam_appid, co-op exe only, hang dump, mod pin, stale Steam) ran to the end", e.GetType().Name + ": " + e.Message + " " + (e.StackTrace ?? "").Split((char)10)[0].Trim()); }
         try { AuditPatch(tmp, realGame); } catch (Exception e) { Check("AUDIT-ERROR", false, "the patch checks ran to the end", e.GetType().Name + ": " + e.Message); }
+        try { AuditThreads(); } catch (Exception e) { Check("AUDIT-ERROR", false, "the thread-safety checks ran to the end", e.GetType().Name + ": " + e.Message); }
         try { Directory.Delete(tmp, true); } catch { }
-        string text = string.Join("\r\n", auditLines.ToArray()) + "\r\nRESULT fail=" + auditFails + "\r\nDONE\r\n";
-        File.WriteAllText(auditOut ?? "audit-exe-result.txt", text);
-        Console.WriteLine(text);
+        WriteAuditOut();
         return auditFails == 0 ? 0 : 1;
     }
 
@@ -261,7 +273,7 @@ static partial class Program
             listener = new TcpListener(IPAddress.Loopback, 0);
             listener.Start();
             Port = ((IPEndPoint)listener.LocalEndpoint).Port;
-            new Thread(Loop) { IsBackground = true }.Start();
+            Bg("audit web server", Loop).Start();
         }
 
         public string Url(string path) { return "http://127.0.0.1:" + Port + path; }
@@ -279,7 +291,7 @@ static partial class Program
             {
                 TcpClient c;
                 try { c = listener.AcceptTcpClient(); } catch { return; }
-                ThreadPool.QueueUserWorkItem(_ => Handle(c));
+                ThreadPool.QueueUserWorkItem(_ => { try { Handle(c); } catch { } });
             }
         }
 

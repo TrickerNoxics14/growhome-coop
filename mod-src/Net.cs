@@ -27,6 +27,10 @@ namespace CoopMod
         // one-off things that happened to the sender (a voice line, a hard landing, a death), flag bit 128. Each one is sent in
         // every packet for half a second (packets can get lost) and the receiver plays it once, by its number (see FxOutbox).
         public FxEvent[] events = new FxEvent[0];
+        // the motion block (see MotionWire): sent in the visibility slot, which old readers read and never use
+        public bool hasMotion;
+        public uint session, sendMs;       // this run of the sender's game; the sender's clock when it was sent (ms)
+        public byte mflags, tp;            // MotionWire flags; counts the sender's teleports (a respawn, a teleporter)
 
         public byte[] Write()
         {
@@ -49,7 +53,8 @@ namespace CoopMod
             w.Write(skin);
             w.Write(jumpScale);
             w.Write((byte)held.Length);
-            w.Write((ushort)vis.Length); w.Write(vis);
+            byte[] slot = hasMotion ? MotionWire.Write(session, sendMs, mflags, tp) : vis;
+            w.Write((ushort)slot.Length); w.Write(slot);
             foreach (var h in held) { w.Write(h.id); W(w, h.pos); W(w, h.vel); w.Write(h.rot.x); w.Write(h.rot.y); w.Write(h.rot.z); w.Write(h.rot.w); }
             // the flower/leaf bits always come with these 30 bytes (an old reader never looks past the held list)
             if (fly == 1 || fly == 2) { W(w, flyOffset); w.Write(flyRot.x); w.Write(flyRot.y); w.Write(flyRot.z); w.Write(flyRot.w); w.Write(petals); w.Write(wear); }
@@ -86,6 +91,7 @@ namespace CoopMod
                 int vl = r.ReadUInt16();
                 if (vl > 4096 || r.BaseStream.Position + vl > data.Length) return null;
                 s.vis = r.ReadBytes(vl);
+                if (MotionWire.Read(s.vis, s) < 0) return null;
                 s.held = new Held[n];
                 for (int i = 0; i < n; i++) { s.held[i].id = r.ReadInt32(); s.held[i].pos = R(r); s.held[i].vel = R(r); s.held[i].rot = new Quaternion(r.ReadSingle(), r.ReadSingle(), r.ReadSingle(), r.ReadSingle()); }
                 s.jet = (f & 16) != 0;

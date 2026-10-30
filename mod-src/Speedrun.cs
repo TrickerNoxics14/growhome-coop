@@ -730,6 +730,7 @@ namespace CoopMod
             try
             {
                 if (!Listening || name == null) return;
+                if (StorySync.Applying) return;      // a friend's story flag copied in: their PC counts it (a co-op run gets it from them), never a split of mine
                 var e = Snapshot(SrEvKind.Accomplishment, name);
                 if (name == "FinalSequenceViewed") ArmFinal(e.Ticks);
                 Feed(e);
@@ -1042,6 +1043,7 @@ namespace CoopMod
                     }
                     break;
                 case "sr_reset": ResetRun(false); break;
+                case "sr_quit": if (WorldSync.InGameOrLoading() && !SaveSystem.loadingScene && Singleton<PauseManager>.Exists) PauseManager.ResetLevel(); break;   // after the run: the game's own Save & Quit
                 case "sr_restart": ResetRun(true); break;
                 case "sr_end": if (Current != null && Current.Live) { End(Current, SrState.Dnf, "ended from the menu"); CoopUI.Toast("RUN ENDED (DNF)"); } break;
                 case "sr_go": if (SpeedrunNet.Node != null) SpeedrunNet.Node.HostGoNow(); break;

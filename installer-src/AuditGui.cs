@@ -243,7 +243,7 @@ static partial class Program
             // a question ignores keys and clicks in its first moments: a key still held down or a double click must not answer it before it can be read
             win.AskGraceMs = 900;
             int graceAnswer = -1; var graceDone = new ManualResetEvent(false);
-            var tg = new Thread(() => { win.AskForTest("Restart Steam now?", new[] { "Yes", "No" }, out graceAnswer); graceDone.Set(); });
+            var tg = Bg("AuditGui worker", () => { win.AskForTest("Restart Steam now?", new[] { "Yes", "No" }, out graceAnswer); graceDone.Set(); });
             tg.Start();
             for (int i = 0; i < 100 && win.Current != GameWindow.View.Ask; i++) { Application.DoEvents(); Thread.Sleep(20); }
             win.PressKey(Keys.N); win.PressKey(Keys.Enter); win.PressKey(Keys.Space); win.Activate(); win.PressKey(Keys.Escape);
@@ -257,7 +257,7 @@ static partial class Program
             // a mouse resting where an answer appears must not choose it: Enter still gives the default (Yes), until the mouse really moves
             win.AskGraceMs = 0;
             int restAnswer = -1; var restDone = new ManualResetEvent(false);
-            var tr = new Thread(() => { win.AskForTest("Restart Steam now?", new[] { "Yes", "No" }, out restAnswer); restDone.Set(); });
+            var tr = Bg("AuditGui worker", () => { win.AskForTest("Restart Steam now?", new[] { "Yes", "No" }, out restAnswer); restDone.Set(); });
             tr.Start();
             for (int i = 0; i < 100 && win.Current != GameWindow.View.Ask; i++) { Application.DoEvents(); Thread.Sleep(20); }
             Snap(win, PW, PH);
@@ -273,23 +273,56 @@ static partial class Program
             // a question asked from another thread (as the real flow does) is answered from the window
             int answer = -1;
             var asked = new ManualResetEvent(false);
-            var t = new Thread(() => { win.AskForTest("Close the other game?", new[] { "Yes", "No" }, out answer); asked.Set(); });
+            var t = Bg("AuditGui worker", () => { win.AskForTest("Close the other game?", new[] { "Yes", "No" }, out answer); asked.Set(); });
             t.Start();
             for (int i = 0; i < 100 && win.Current != GameWindow.View.Ask; i++) { Application.DoEvents(); Thread.Sleep(20); }
             Check("GUI-INPUT", win.Current == GameWindow.View.Ask, "a question from the worker thread appears in the window", win.Current.ToString());
             win.PressKey(Keys.N);
             asked.WaitOne(5000);
             Check("GUI-INPUT", answer == 1, "pressing N answers No", "answer " + answer);
-            var t2 = new Thread(() => { win.AskForTest("Close the other game?", new[] { "Yes", "No" }, out answer); asked.Set(); });
+            var t2 = Bg("AuditGui worker", () => { win.AskForTest("Close the other game?", new[] { "Yes", "No" }, out answer); asked.Set(); });
             asked.Reset(); t2.Start();
             for (int i = 0; i < 100 && win.Current != GameWindow.View.Ask; i++) { Application.DoEvents(); Thread.Sleep(20); }
             win.PressKey(Keys.Y); asked.WaitOne(5000);
             Check("GUI-INPUT", answer == 0, "pressing Y answers Yes", "answer " + answer);
-            var t3 = new Thread(() => { win.AskForTest("Which colour?", new[] { "Red", "Blue" }, out answer); asked.Set(); });
+            var t3 = Bg("AuditGui worker", () => { win.AskForTest("Which colour?", new[] { "Red", "Blue" }, out answer); asked.Set(); });
             asked.Reset(); t3.Start();
             for (int i = 0; i < 100 && win.Current != GameWindow.View.Ask; i++) { Application.DoEvents(); Thread.Sleep(20); }
             win.PressKey(Keys.Down); win.PressKey(Keys.Enter); asked.WaitOne(5000);
             Check("GUI-INPUT", answer == 1, "choosing the second option with the keys answers 1", "answer " + answer);
+
+            // the frozen-game question through the real AskCloseFrozen and this window: Escape, N and Enter on the fresh question leave the game
+            // running (its safe answer is the FIRST one), only Y or choosing "Close it" closes it
+            var keepHook = chooseHook;
+            var frozen = new List<string>();
+            try
+            {
+                chooseHook = (q, o) => { int a; win.AskForTest(q, o, out a); return a; };
+                foreach (var how in new[] { "Escape", "N", "Enter", "Y", "Down+Enter" })
+                {
+                    bool closes = false; var fdone = new ManualResetEvent(false);
+                    var tf = Bg("AuditGui worker", () => { closes = AskCloseFrozen("Close the frozen game?"); fdone.Set(); });
+                    tf.Start();
+                    for (int i = 0; i < 100 && win.Current != GameWindow.View.Ask; i++) { Application.DoEvents(); Thread.Sleep(20); }
+                    bool startsSafe = win.Selected == 0 && win.ItemTexts().Length == 2 && win.ItemTexts()[0] == "Leave it running";
+                    switch (how)
+                    {
+                        case "Escape": win.PressKey(Keys.Escape); break;
+                        case "N": win.PressKey(Keys.N); break;
+                        case "Enter": win.PressKey(Keys.Enter); break;
+                        case "Y": win.PressKey(Keys.Y); break;
+                        default: win.PressKey(Keys.Down); win.PressKey(Keys.Enter); break;
+                    }
+                    bool answered = fdone.WaitOne(5000);
+                    frozen.Add(how + "=" + (answered ? (closes ? "close" : "keep") : "no answer") + (startsSafe ? "" : " (did not start on Leave it running)"));
+                }
+            }
+            finally { chooseHook = keepHook; }
+            bool frozenOk = frozen.SequenceEqual(new[] { "Escape=keep", "N=keep", "Enter=keep", "Y=close", "Down+Enter=close" });
+            int safeYesNo = SafeAnswer(new[] { "Yes", "No" }), safeReplace = SafeAnswer(new[] { "Replace it", "Cancel" }), safeStale = SafeAnswer(new[] { StaleRestart, StaleCancel }), safeFrozen = SafeAnswer(FrozenAnswers);
+            bool safeRule = safeYesNo == 1 && safeReplace == 1 && safeStale == 1 && safeFrozen == 0;
+            Check("HANG-NO-FALSE-KILL", frozenOk && safeRule, "in the window, Escape, N and Enter on the frozen-game question leave the game running; only Y or choosing \"Close it\" closes it (Escape and N give each question's answer that changes nothing)",
+                string.Join(", ", frozen.ToArray()) + "; safe answers Yes/No=" + safeYesNo + " Replace/Cancel=" + safeReplace + " Restart/Cancel=" + safeStale + " frozen=" + safeFrozen);
 
             // settings are plain files and toggle both ways
             win.ShowSettings();

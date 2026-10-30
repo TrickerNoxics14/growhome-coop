@@ -204,7 +204,7 @@ static partial class Program
             ShowHome();
         }
 
-        public bool IsInstalled { get { return File.Exists(Path.Combine(gameDir, "GrowHome.exe")) && File.Exists(Path.Combine(gameDir, "GrowHome_Data", "Managed", "CoopMod.dll")); } }
+        public bool IsInstalled { get { return CopyInstalled(gameDir); } }   // the same test as the flow: a missing CoopMod.dll is put back at the start, not a reinstall
 
         void Post(Action a) { try { if (IsHandleCreated && !IsDisposed) BeginInvoke(a); } catch { } }
 
@@ -258,7 +258,7 @@ static partial class Program
 
         void RefreshStatus()
         {
-            ThreadPool.QueueUserWorkItem(_ =>
+            BgPool("window status", () =>
             {
                 var s = new List<string>();
                 try
@@ -285,12 +285,12 @@ static partial class Program
             running = true; failed = false; resultLine = ""; log.Clear(); ProgressNow = 0;
             runTitle = IsInstalled ? "Starting" : "Installing"; updateCheck = false;
             Current = View.Run; items.Clear(); Selected = 0;
-            var worker = new Thread(() =>
+            var worker = Bg("Gui worker", () =>
             {
                 int code = 1;
                 try { code = RunFlow(); } catch (Exception e) { Post(() => AddLine("Something went wrong: " + e.Message)); }
                 Post(() => FlowDone(code));
-            }) { IsBackground = true };
+            });
             worker.Start();
             Invalidate();
         }
@@ -303,12 +303,12 @@ static partial class Program
             running = true; failed = false; resultLine = ""; log.Clear(); ProgressNow = 0; updateCheck = true;
             runTitle = "Checking for updates";
             Current = View.Run; items.Clear(); Selected = 0;
-            var worker = new Thread(() =>
+            var worker = Bg("Gui worker", () =>
             {
                 try { CheckForUpdate(false, true, true); }
                 catch (Exception e) { LastCheck = "failed"; Post(() => AddLine("Could not check: " + e.Message)); }
                 Post(() => UpdateCheckDone());
-            }) { IsBackground = true };
+            });
             worker.Start();
             Invalidate();
         }
@@ -328,6 +328,22 @@ static partial class Program
             Invalidate();
         }
 
+        public WindowMove LastMove = WindowMove.Nothing;
+        const int SW_SHOWNOACTIVATE = 4;
+
+        // Shows or closes the window as WindowAfter decided.
+        void MoveWindow(WindowMove m)
+        {
+            LastMove = m;
+            if (testing) return;
+            switch (m)
+            {
+                case WindowMove.Close: Close(); break;
+                case WindowMove.Show: Show(); base.Activate(); break;
+                case WindowMove.ShowQuiet: ShowWindow(Handle, SW_SHOWNOACTIVATE); Visible = true; break;
+            }
+        }
+
         public bool CheckRunning { get { return running; } }
         public string ResultLine { get { return resultLine; } }
 
@@ -338,12 +354,13 @@ static partial class Program
             {
                 resultLine = "CO-OP MOD LOADED. HAVE FUN!";
                 ProgressNow = 100;
-                if (!testing && !Visible) Show(); closeAt = DateTime.UtcNow.AddSeconds(2.5);
+                // hidden while the update check finished: the game is up by now, so the window just goes (it never comes up over the game)
+                MoveWindow(WindowAfter(true, false, Visible, false)); closeAt = DateTime.UtcNow.AddSeconds(2.5);
             }
             else
             {
                 failed = true; resultLine = "SOMETHING NEEDS ATTENTION";
-                if (!testing && !Visible) Show(); items.Clear(); Selected = 0;
+                MoveWindow(WindowAfter(false, false, Visible, RunningGames().Count > 0)); items.Clear(); Selected = 0;
                 items.Add(new MenuItem { Text = "Try again", Click = BeginFlow });
                 items.Add(new MenuItem { Text = "Back", Click = () => { ShowHome(); RefreshStatus(); } });
                 items.Add(new MenuItem { Text = "Quit", Click = () => Close() });
@@ -362,7 +379,7 @@ static partial class Program
 
         int Ask(string question, string[] options)
         {
-            int result = options.Length - 1;
+            int result = SafeAnswer(options);
             var done = new ManualResetEvent(false);
             Post(() => ShowAsk(question, options, i => { result = i; done.Set(); }));
             done.WaitOne();
@@ -376,7 +393,7 @@ static partial class Program
             Current = View.Ask; askText = question; askOptions = options; askDone = answered; askShownAt = DateTime.UtcNow; askMouse = Cursor.Position;
             items.Clear(); Selected = 0;
             for (int i = 0; i < options.Length; i++) { int k = i; items.Add(new MenuItem { Text = options[i], Click = () => Answer(k) }); }
-            if (!testing && !Visible) Show();
+            MoveWindow(WindowAfter(false, true, Visible, false));
             Invalidate();
         }
 
@@ -398,7 +415,7 @@ static partial class Program
         public void Back()
         {
             if (Current == View.Settings) { ShowHome(); RefreshStatus(); }
-            else if (Current == View.Ask) { if (!AskIsSettling()) Answer(askOptions.Length - 1); }
+            else if (Current == View.Ask) { if (!AskIsSettling()) Answer(SafeAnswer(askOptions)); }   // the answer that changes nothing, which is not always the last one
             else if (Current == View.Home) Close();
             else if (Current == View.Run && !running && (failed || updateCheck)) { ShowHome(); RefreshStatus(); }
         }
@@ -414,8 +431,8 @@ static partial class Program
                 case Keys.Left: case Keys.Right: if (Current == View.Settings && Selected < items.Count && items[Selected].Value != null) Activate(); break;
                 case Keys.Enter: case Keys.Space: Activate(); break;
                 case Keys.Escape: Back(); break;
-                case Keys.Y: if (Current == View.Ask && askOptions.Length == 2 && !AskIsSettling()) Answer(0); break;
-                case Keys.N: if (Current == View.Ask && askOptions.Length == 2 && !AskIsSettling()) Answer(1); break;
+                case Keys.Y: if (Current == View.Ask && askOptions.Length == 2 && !AskIsSettling()) Answer(1 - SafeAnswer(askOptions)); break;   // Y: the answer that does something
+                case Keys.N: if (Current == View.Ask && askOptions.Length == 2 && !AskIsSettling()) Answer(SafeAnswer(askOptions)); break;   // N: the one that changes nothing ("Leave it running" on the frozen-game question)
             }
         }
 
@@ -690,7 +707,15 @@ static partial class Program
             }
         }
 
-        protected override void OnPaint(PaintEventArgs e) { Draw(e.Graphics, ClientSize); }
+        // one bad frame (a GDI+ error) is logged and skipped: it never takes the window down or shows the WinForms error dialog
+        public Action TestPaintFault;
+        public int PaintFaults;
+        public bool SafeDraw(Graphics g, Size size)
+        {
+            try { if (TestPaintFault != null) TestPaintFault(); Draw(g, size); return true; }
+            catch (Exception ex) { PaintFaults++; if (PaintFaults <= 3) Log("window: a frame could not be drawn: " + ex.GetType().Name + ": " + ex.Message); return false; }
+        }
+        protected override void OnPaint(PaintEventArgs e) { SafeDraw(e.Graphics, ClientSize); }
         protected override void OnPaintBackground(PaintEventArgs e) { }
 
         // ---- for the audit ------------------------------------------------------------------------------------------------------------

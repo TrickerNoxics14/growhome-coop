@@ -2,11 +2,12 @@
 # a full audit (the only kind a release accepts) always runs and requires every line of required-checks.txt.
 # Format:  ID | groups (comma separated)   - a check is required in a quick run when ANY of its groups was chosen.
 # Rules without a line here:  "exe" checks belong to the group "launcher"; BUILD-OK is always required; the other "script" checks
-# (GAME-STARTS-MODDED, NO-UNEXPECTED-ERRORS, ORIGINAL-UNTOUCHED, AUDIT-RESTORED, LAUNCH-VERIFIED) whenever the game stage runs.
+# (GAME-STARTS-MODDED, NO-UNEXPECTED-ERRORS, ORIGINAL-UNTOUCHED, AUDIT-RESTORED, LAUNCH-VERIFIED, ONLY-COOP-EXE, RESULT-COMPLETE) whenever the game stage runs;
+# REAL-DATA-UNCHANGED and NO-CRASH-EVENTS in every run. HOLLOW-PASS has no line on purpose: every quick run requires it.
 # A "game" check missing here is required in EVERY quick run (so a new check without a group shows up as NOT RUN instead of hiding).
 # The groups must match the On("...") tags of the sections in coopmod\SelfTest.cs. A check a skipped group would have run is SKIPPED;
 # one that reported anyway (its section is shared with a chosen group) is judged as usual.
-# Groups: world, plants, party, net, clone, fx, ui, speedrun, launcher
+# Groups: world, plants, party, net, clone, fx, ui, speedrun, session, movement, story, creatures, launcher
 LZ-ROUNDTRIP          | net,plants
 LZ-HOSTILE            | net
 GATE-ROUTING          | net
@@ -90,3 +91,51 @@ SR-RACE-FSM           | speedrun,party
 SR-RACE-LOOP          | speedrun,party
 SR-COOP-TIMER         | speedrun,party
 SR-RACE-ISOLATION     | speedrun
+HANG-GUARD            | world,session
+QUIT-GUARD            | ui,session
+PAUSE-ROWS            | ui,session
+LEADER-LEFT           | party,session
+MOVE-WIRE             | movement,net
+MOVE-BUFFER           | movement
+MOVE-SESSION          | movement
+MOVE-SIM              | movement
+MOVE-FAR              | movement
+MOVE-NEAR             | movement
+PLANT-ONPLANT-BODY    | plants
+PLANT-GROW-LEASE      | plants
+PLANT-LEASE-NOREVERT  | plants
+PLANT-LEASE-ISLAND    | plants
+PLANT-LEASE-TIMEOUT   | plants
+PLANT-GUEST-QUIET     | plants
+PLANT-COLLIDERS       | plants
+CS-WIRE               | story,net
+CS-FLAG-LIST          | story,net
+CS-FLAG               | story
+CS-RELAY              | story
+CS-SR                 | story
+CS-CENSUS             | story
+CS-MIRROR             | story
+CS-SKIP-AUTH          | story
+CS-BLOCKS             | story
+CS-LOCAL              | story
+CS-ORDER              | story
+CS-SCROLL             | story
+CS-OUTRO              | story
+CS-NUTRIENT           | story
+CREATURE-WIRE         | creatures,net
+CREATURE-BUDGET       | creatures,net
+CREATURE-INTEREST     | creatures,net
+CREATURE-CENSUS       | creatures
+CREATURE-LEADER       | creatures
+CREATURE-AWAKE        | creatures
+CREATURE-FLYSHEEP     | creatures
+CREATURE-CLAIM        | creatures
+CREATURE-PUPPET       | creatures
+CREATURE-DEATH        | creatures
+CREATURE-CLAIM-GUEST  | creatures
+CREATURE-TRAP         | creatures
+CREATURE-RELEASE      | creatures
+LEADER-BEAT           | party,session
+LEADER-LEFT-SAVE      | party,session
+QUIT-DOOMED           | ui,session
+QUIT-GUARD-LOG        | ui,session

@@ -19,6 +19,9 @@ namespace CoopMod
         public int FxTaken;                               // events let through the repeat filter (also with no copy to show them on)
 
         public uint LastRecvSeq;
+        public uint BeatSession, BeatSeq;        // the newest leader beat (LeaderBeat) heard from them
+        public uint Beats;                       // moves only when THEY sent something new (a pose with a higher number, a newer beat): never from pings or echoes
+        public uint MotionSession;               // the run of their game their packets come from (0: not known, or an old version)
         public float LastPacketTime = -999f, ConnectedAt = -999f;
         public bool AutoPulled;
         public float LastPullAt = -999f;

@@ -38,10 +38,210 @@ namespace CoopMod
         public static void ForceSend(string rootId) { if (rootId != null) forced.Add(rootId); }
         public static Func<ulong, bool> MayTakeFrom;         // (leader) this player plays in my world now: asked again when a waiting update finally lands
         // a different world: nothing known about the old one may be used in it (numbers, waiting updates, holds)
-        public static void ForgetWorld() { plantNumber.Clear(); forced.Clear(); waiting.Clear(); owner.Clear(); dirty.Clear(); lastSig.Clear(); ForgetEchoes(); }
+        public static void ForgetWorld() { plantNumber.Clear(); forced.Clear(); waiting.Clear(); owner.Clear(); dirty.Clear(); lastSig.Clear(); ForgetEchoes(); ForgetGrowth(); StorySync.ForgetWorld(); }
         static void ForgetEchoes() { takenFrom.Clear(); takenSig.Clear(); sentBase.Clear(); sentFirstSig.Clear(); }
+        static void ForgetGrowth() { leases.Clear(); growing.Clear(); finishing.Clear(); realNumber.Clear(); realChange.Clear(); leaseEcho.Clear(); waitSince.Clear(); offSince.Clear(); }
+
+        // ---- grow lease: a guest growing a vine --------------------------------------------------------------------------------------
+        // Pressing E on a nub and riding the new vine happens only on the grower's PC. The grower tells the leader "I grow this plant" (start), sends its
+        // plant while riding and once more when done (end). Meanwhile the leader takes that guest's copy of the plant whatever number it carries, sends
+        // nothing of that plant itself and the guest ignores the leader's copies of it. After the end the leader passes the plant on to everybody.
+        // Safety: a guest copy older than the leader's newest REAL growth (a vine the leader grew, or one it took) is refused and the lease is revoked,
+        // so a guest can never cut a vine off the leader's plant. The leader's own trunk creeping up by itself does not count as real growth.
+        public const byte MsgGrow = 15;      // [15][what: 1 start, 2 end, 3 revoked][plant id][player u64][number i32]
+        public const byte GrowStart = 1, GrowEnd = 2, GrowRevoked = 3;
+        public const float LeaseTime = 45f;  // the longest a vine is ridden; the leader waits 10 s more for the end
+        const float SettleAfterGrow = 1.5f;  // a finished vine still adds its nub and leaves: send it after this
+        const float MaxWait = 20f;           // a friend update waits at most this long while I only stand near the plant
+        class Lease { public ulong Holder; public float Until; public bool Ended, Took; }
+        class Growing { public PlantBranch Branch; public float Since; public float DoneAt = -1f; public bool Pinned; }   // Pinned: the audit says when it is done
+        static readonly Dictionary<string, Lease> leases = new Dictionary<string, Lease>();          // (leader) who grows which plant now
+        static readonly Dictionary<string, Growing> growing = new Dictionary<string, Growing>();     // (me) the vine I ride
+        static readonly HashSet<string> finishing = new HashSet<string>();                            // (guest) my vine is done: send the plant now, then the end
+        static readonly Dictionary<string, int> realNumber = new Dictionary<string, int>();          // (leader) the number of my last send with real growth in it
+        static readonly HashSet<string> realChange = new HashSet<string>();                           // (leader) real growth not sent yet
+        static readonly HashSet<string> leaseEcho = new HashSet<string>();                            // (leader) the next send is the lease holder's own plant
+        static readonly Dictionary<string, float> waitSince = new Dictionary<string, float>();
+        public static int StatLeases, StatLeaseRefused, StatLeaseDone, StatLeaseTimeouts, StatHeldForGrow, StatIslandsOnLeader;
+
+        static byte[] GrowMessage(byte what, string rootId, ulong player, int number)
+        {
+            var ms = new MemoryStream(); var w = new BinaryWriter(ms);
+            w.Write(MsgGrow); w.Write(what); w.Write(rootId); w.Write(player); w.Write(number);
+            return ms.ToArray();
+        }
+
+        static PlantRoot RootOf(PlantBranch b)
+        {
+            if (b == null) return null;
+            return b.m_PlantRoot != null ? b.m_PlantRoot : b.GetComponentInParent<PlantRoot>();
+        }
+
+        // the game's own "a bud was popped" call: it fires only on the PC of the player who pressed E (copies of friends never grab)
+        static void OnGrowthTriggered(Transform t)
+        {
+            try
+            {
+                if (applying || !Enabled || t == null || Speedrun.Isolated || LeaderId == 0) return;
+                var b = t.GetComponent<PlantBranch>();
+                string id = IdOf(RootOf(b));
+                if (id == null) return;
+                StartGrowing(id, b);
+            }
+            catch (Exception e) { CoopBehaviour.Log("shared: grow start: " + Short(e)); }
+        }
+
+        static void StartGrowing(string id, PlantBranch b)
+        {
+            growing[id] = new Growing { Branch = b, Since = Time.time };
+            if (IAmLeader)
+            {
+                Lease ls;
+                if (leases.TryGetValue(id, out ls))
+                {
+                    // the leader keeps priority: the friend's vine on this plant is not taken
+                    outbox.Add(GrowMessage(GrowRevoked, id, ls.Holder, 0)); leases.Remove(id); ForceSend(id);
+                    CoopBehaviour.Log("shared: I grow plant " + id + " myself; the lease of " + ls.Holder + " is revoked");
+                }
+                realChange.Add(id);
+                return;
+            }
+            int n; plantNumber.TryGetValue(id, out n);
+            waiting.Remove(id); waitSince.Remove(id);          // an older leader copy waiting for me would undo the vine I grow now
+            dirty.Add(id);
+            outbox.Add(GrowMessage(GrowStart, id, MyId, n));
+            CoopBehaviour.Log("shared: I grow a vine on plant " + id + " (built on the leader's number " + n + "); told the leader");
+        }
+
+        // (any role) my vine is done (or gone, or ridden too long): a guest sends the plant and the end once the vine has settled
+        static void TickGrowing()
+        {
+            foreach (var id in new List<string>(growing.Keys))
+            {
+                var g = growing[id];
+                bool done = (!g.Pinned && (g.Branch == null || g.Branch.m_DoneGrowing)) || Time.time - g.Since > LeaseTime;
+                if (done && g.DoneAt < 0f) g.DoneAt = Time.time;
+                if (g.DoneAt < 0f || Time.time - g.DoneAt < SettleAfterGrow) continue;
+                growing.Remove(id);
+                if (IAmGuest) finishing.Add(id);
+                else if (IAmLeader) { realChange.Add(id); dirty.Add(id); }
+            }
+        }
+
+        // (leader) a lease that ended is passed on once its plant really landed here; one never ended runs out
+        static void TickLeases()
+        {
+            foreach (var id in new List<string>(leases.Keys))
+            {
+                var ls = leases[id];
+                if (ls.Ended && !waiting.ContainsKey(id)) FinishLease(id, ls);
+                else if (!ls.Ended && Time.time > ls.Until)          // an ended vine waits for its plant to land here (at most MaxWait, see ApplyWaiting)
+                {
+                    leases.Remove(id); StatLeaseTimeouts++; ForceSend(id);
+                    CoopBehaviour.Log("shared: the vine of " + ls.Holder + " on plant " + id + " never ended; normal rules again, everybody gets my plant");
+                }
+            }
+        }
+
+        static void FinishLease(string id, Lease ls)
+        {
+            leases.Remove(id); StatLeaseDone++;
+            lastSent.Remove(id); ForceSend(id);
+            CoopBehaviour.Log("shared: " + ls.Holder + " finished a vine on plant " + id + (ls.Took ? "; passing it on to everybody" : " but no plant came; everybody gets mine"));
+        }
+
+        static void ApplyGrow(byte[] msg, ulong from)
+        {
+            if (msg.Length > 100) throw new FormatException("bad grow message");
+            var r = new BinaryReader(new MemoryStream(msg)); r.ReadByte();
+            byte what = r.ReadByte(); string id = r.ReadString(); ulong player = r.ReadUInt64(); int number = r.ReadInt32();
+            if (r.BaseStream.Position != msg.Length || id.Length == 0 || id.Length > 64 || what < GrowStart || what > GrowRevoked) throw new FormatException("bad grow message");
+            ulong sender = SenderOf(from, player);
+            if (!WorldSync.InWorld()) return;
+            if (what == GrowRevoked)
+            {
+                if (!IAmGuest || (from != 0 && from != LeaderId) || player != MyId) return;      // only the leader revokes, only mine counts
+                bool had = growing.Remove(id) | finishing.Remove(id);
+                dirty.Remove(id);
+                if (had) { CoopUI.Toast("THE LEADER'S PLANT CHANGED: YOUR VINE IS NOT KEPT"); Status = "your vine was not kept"; }
+                CoopBehaviour.Log("shared: the leader did not take my vine on plant " + id);
+                return;
+            }
+            if (!IAmLeader) return;
+            if (from != 0 && MayTakeFrom != null && !MayTakeFrom(from)) return;     // not (or no longer) in my world
+            Lease ls;
+            if (what == GrowEnd)
+            {
+                if (!leases.TryGetValue(id, out ls) || ls.Holder != sender) return;
+                ls.Ended = true;
+                if (!waiting.ContainsKey(id)) FinishLease(id, ls);
+                return;
+            }
+            if (!HasPlant(id)) return;
+            int real; realNumber.TryGetValue(id, out real);
+            string why = null;
+            if (leases.TryGetValue(id, out ls) && ls.Holder != sender && Time.time < ls.Until) why = "another player is growing it";
+            else if (growing.ContainsKey(id)) why = "I am growing it myself";
+            else if (number < real) why = "their copy (" + number + ") is older than my newest vine (" + real + ")";
+            else if (realChange.Contains(id) || forced.Contains(id) || LeaderHasUnsent(id)) why = "I have growth on it they have not got yet";   // their plant would cut it off
+            if (why != null)
+            {
+                StatLeaseRefused++;
+                outbox.Add(GrowMessage(GrowRevoked, id, sender, 0)); ForceSend(id);
+                CoopBehaviour.Log("shared: " + sender + " wants to grow plant " + id + "; refused: " + why);
+                return;
+            }
+            leases[id] = new Lease { Holder = sender, Until = Time.time + LeaseTime + 10f };
+            StatLeases++;
+            CoopBehaviour.Log("shared: " + sender + " grows a vine on plant " + id + "; their copy of it counts until they are done");
+        }
+
+        // (leader) islands a friend's vine connected: the plant data sets them attached, the game's own connect step (trunk growth + counter) is done here
+        static HashSet<int> AttachedProviders()
+        {
+            var set = new HashSet<int>();
+            foreach (NutrientProvider n in UnityEngine.Object.FindObjectsOfType(typeof(NutrientProvider))) if (n.m_attached) set.Add(n.GetInstanceID());
+            return set;
+        }
+
+        static void ConnectNewIslands(HashSet<int> before, int connBefore)
+        {
+            if (!Singleton<PlayerAnalytics>.Exists) return;
+            var fresh = new List<NutrientProvider>();
+            foreach (NutrientProvider n in UnityEngine.Object.FindObjectsOfType(typeof(NutrientProvider))) if (n.m_attached && !before.Contains(n.GetInstanceID())) fresh.Add(n);
+            if (fresh.Count == 0) return;
+            EnsureGrowingBeanstalk();
+            var trunk = PlantBranch.CurrentlyGrowingBeanstalk;
+            var pa = Singleton<PlayerAnalytics>.Instance;
+            int grownWith = trunk != null ? trunk.m_connectedIslands - connBefore : 0;      // the trunk came in the same update: it has the connection already
+            for (int i = 0; i < fresh.Count; i++)
+            {
+                try
+                {
+                    if (i >= grownWith && trunk != null && pa.m_nutrientIslandsAttched < trunk.m_growthAmountsPerIsland.Length) trunk.OnIslandConnect();
+                }
+                catch (Exception e) { CoopBehaviour.Log("shared: island connect on my trunk: " + Short(e)); }
+                if (pa.m_nutrientIslandsAttched < MaxIslands) pa.m_nutrientIslandsAttched++;
+                StatIslandsOnLeader++;
+                try { fresh[i].StartCoroutine("ShowCurrentBeanstalkHeight"); } catch (Exception) { }
+            }
+            CoopUI.Toast("A FRIEND CONNECTED AN ISLAND (" + pa.m_nutrientIslandsAttched + ")");
+            CoopBehaviour.Log("shared: a friend's vine connected " + fresh.Count + " island(s) in my world; island count is now " + pa.m_nutrientIslandsAttched);
+        }
+
+        // ---- self test hooks for the lease --------------------------------------------------------------------------------------------
+        public static void TestStartGrowing(PlantRoot r, PlantBranch b) { StartGrowing(IdOf(r), b); Growing g; if (growing.TryGetValue(IdOf(r), out g)) g.Pinned = true; }
+        public static void TestEndGrowing(string rootId) { Growing g; if (growing.TryGetValue(rootId, out g)) { g.Pinned = false; g.Branch = null; g.DoneAt = Time.time - SettleAfterGrow - 0.1f; } }
+        public static bool TestIsGrowing(string rootId) { return growing.ContainsKey(rootId) || finishing.Contains(rootId); }
+        public static ulong TestLeaseHolder(string rootId) { Lease ls; return leases.TryGetValue(rootId, out ls) ? ls.Holder : 0UL; }
+        public static void TestAgeLease(string rootId, float seconds) { Lease ls; if (leases.TryGetValue(rootId, out ls)) ls.Until -= seconds; }
+        public static void TestTickLeases() { TickLeases(); }
+        public static void SetRealNumberForTest(string rootId, int n) { realNumber[rootId] = n; }
+        public static byte[] TestGrowMessage(byte what, PlantRoot r, ulong player, int number) { return GrowMessage(what, IdOf(r), player, number); }
+        public static void ClearGrowthForTest() { ForgetGrowth(); }
         public static void MarkSeenForTest(PlantRoot r) { string id = IdOf(r); lastSig[id] = Signature(r); dirty.Remove(id); }
         public static void MarkDirtyForTest(string rootId) { dirty.Add(rootId); }
+        public static void MarkRealChangeForTest(string rootId) { realChange.Add(rootId); }
 
         // (leader) my plant changed since I last looked at it or has growth not sent yet: a guest's copy cannot have that, whatever number it carries
         static bool LeaderHasUnsent(string rootId)
@@ -101,10 +301,10 @@ namespace CoopMod
         public static bool QuietRejects;                      // set by the fuzz test, which sends hundreds of bad messages on purpose: keeps the log readable
         public static bool TestFailInPlaceOnce;               // fault injection: the next in-place plant update fails, so the rebuild path is exercised
 
-        public static bool IsMessage(byte[] m) { return m != null && m.Length > 0 && (m[0] == MsgPlant || m[0] == MsgPlant2 || m[0] == MsgShard || m[0] == MsgIsland || m[0] == MsgTeleporter || m[0] == MsgPickup); }
+        public static bool IsMessage(byte[] m) { return m != null && m.Length > 0 && (m[0] == MsgPlant || m[0] == MsgPlant2 || m[0] == MsgShard || m[0] == MsgIsland || m[0] == MsgTeleporter || m[0] == MsgPickup || m[0] == MsgGrow); }
 
         // After the whole world was replaced (join): forget what I knew and give things a few seconds to settle.
-        public static void Rebaseline() { quietUntil = Time.time + 6f; teleKnown.Clear(); teleSeen = false; lastSig.Clear(); dirty.Clear(); owner.Clear(); lastIslandCount = -1; attachedIds.Clear(); plantNumber.Clear(); forced.Clear(); waiting.Clear(); ForgetEchoes(); }
+        public static void Rebaseline() { quietUntil = Time.time + 6f; teleKnown.Clear(); teleSeen = false; lastSig.Clear(); dirty.Clear(); owner.Clear(); lastIslandCount = -1; attachedIds.Clear(); plantNumber.Clear(); forced.Clear(); waiting.Clear(); ForgetEchoes(); ForgetGrowth(); }
 
         static bool InitReflection()
         {
@@ -147,6 +347,8 @@ namespace CoopMod
             JointShard.m_onShardRemoval = (JointShard.OnShardRemoval)Delegate.Combine(JointShard.m_onShardRemoval, new JointShard.OnShardRemoval(OnLocalShardCollected));
             // fires only when a pickup really went into my inventory (not on a grab that was let go), just before the pickup is removed
             ParachutePickup.m_flyablePickedUpObjectDelegate = (ParachutePickup.FlyablePickedUpObject)Delegate.Combine(ParachutePickup.m_flyablePickedUpObjectDelegate, new ParachutePickup.FlyablePickedUpObject(OnLocalPickup));
+            // fires when I pop a bud (E on a nub) and start riding the new vine
+            PlantBranch.m_growthTriggered = (PlantBranch.GrowthTrigger)Delegate.Combine(PlantBranch.m_growthTriggered, new PlantBranch.GrowthTrigger(OnGrowthTriggered));
         }
 
         // ---- flower and leaf pickups -------------------------------------------------------------------------------------------------
@@ -370,33 +572,67 @@ namespace CoopMod
         }
 
         // Is my walkster standing on (or climbing) this plant? The camera follows its grip on the branches, so a plant it stands on is not rebuilt under it.
-        static bool OnPlant(string rootId)
+        // 0: no, 1: my body is near a part of it, 2: I hold or ride it (a hand on it, a nub grabbed, a vine popped and not done).
+        public const int OffPlant = 0, NearThePlant = 1, HoldingPlant = 2;
+        public static Vector3? TestBodyOverride;              // the audit puts my body somewhere else without moving anything
+        static bool OnPlant(string rootId) { return OnPlantState(rootId) != OffPlant; }
+
+        static int OnPlantState(string rootId)
         {
-            if (TestPlayerOnPlant.HasValue) return TestPlayerOnPlant.Value;
-            var me = GameObject.Find("Walkster");
-            if (me == null) return false;
+            if (TestPlayerOnPlant.HasValue) return TestPlayerOnPlant.Value ? HoldingPlant : OffPlant;
             foreach (PlantRoot pr in UnityEngine.Object.FindObjectsOfType(typeof(PlantRoot)))
-            {
-                if (IdOf(pr) != rootId) continue;
-                foreach (var t in pr.GetComponentsInChildren<Transform>(true))
-                    if ((t.position - me.transform.position).sqrMagnitude < NearPlant * NearPlant) return true;
-                return false;
-            }
-            return false;
+                if (IdOf(pr) == rootId) return PlayerOn(pr, BodyPosition());
+            return OffPlant;
         }
 
-        // Applies the waited updates of the plants I have stepped off.
+        // Where my walkster really is: its body. The "Walkster" object itself stays at the level start.
+        public static Vector3? BodyPosition()
+        {
+            if (TestBodyOverride.HasValue) return TestBodyOverride.Value;
+            var me = GameObject.Find("Walkster");
+            if (me == null) return null;
+            var w = me.GetComponentInChildren<BipedWalkScript>();
+            return w != null && w.body != null ? w.body.position : me.transform.position;
+        }
+
+        public static int PlayerOn(PlantRoot pr, Vector3? body)
+        {
+            if (pr == null) return OffPlant;
+            foreach (var b in pr.GetComponentsInChildren<PlantBranch>(true))
+                if (b != null && (b.m_PlayerLockedOn || b.IsGrabbed || (b.m_BudTriggered && !b.m_DoneGrowing))) return HoldingPlant;
+            var me = GameObject.Find("Walkster");
+            if (me != null)
+                foreach (var h in me.GetComponentsInChildren<BipedHandScript>())
+                    if (h != null && h.grabbedObject != null && h.grabbedObject.IsChildOf(pr.transform)) return HoldingPlant;
+            if (!body.HasValue) return OffPlant;
+            Vector3 at = body.Value;
+            foreach (var c in Physics.OverlapSphere(at, NearPlant)) if (c != null && c.transform.IsChildOf(pr.transform)) return NearThePlant;
+            foreach (var t in pr.GetComponentsInChildren<Transform>(true))           // parts whose colliders are off right now
+                if ((t.position - at).sqrMagnitude < NearPlant * NearPlant) return NearThePlant;
+            return OffPlant;
+        }
+
+        // Applies the waited updates of the plants I have stepped off. Standing near a plant holds an update at most MaxWait; holding or riding it
+        // holds it until I let go (a finished friend's vine on the leader also lands after MaxWait: everybody waits for it).
         static void ApplyWaiting()
         {
             foreach (var id in new List<string>(waiting.Keys))
             {
-                if (OnPlant(id)) continue;
+                int st = OnPlantState(id);
+                float since; if (!waitSince.TryGetValue(id, out since)) since = Time.time;
+                bool overdue = Time.time - since > MaxWait;
+                Lease ls; bool leaseEnded = IAmLeader && leases.TryGetValue(id, out ls) && ls.Ended;
+                if (st == HoldingPlant && !(overdue && leaseEnded)) continue;
+                if (st == NearThePlant && !overdue) continue;
                 var w = waiting[id];
-                waiting.Remove(id);
-                try { ApplyPlant(w.Value, w.Key); CoopBehaviour.Log("shared: applied a friend plant update that waited while I stood on the plant"); }
+                waiting.Remove(id); waitSince.Remove(id);
+                landing = true;
+                try { ApplyPlant(w.Value, w.Key); CoopBehaviour.Log("shared: applied a friend plant update that waited " + (Time.time - since).ToString("F0") + " s while I stood on the plant" + (st != OffPlant ? " (waited long enough)" : "")); }
                 catch (Exception e) { StatRejected++; CoopBehaviour.Log("shared: a waited plant update failed (" + Short(e) + ")"); }
+                finally { landing = false; }
             }
         }
+        static bool landing;                                  // a waited update lands now: it does not wait again
 
         // One try at loading a plant update into the scene. Everything not in the update keeps its state.
         static void LoadUpdate(byte[] data)
@@ -437,19 +673,181 @@ namespace CoopMod
                         if (keep != null && keep.gameObject != go && !keep.m_runtimeSpawned) keep.transform.parent = pr.transform;
                     if (pr.m_CrownObject != null && pr.m_CrownObject.IsChildOf(go.transform)) pr.m_CrownObject.parent = pr.transform;
                 }
-                foreach (var go in doomed) if (go != null) UnityEngine.Object.DestroyImmediate(go);
+                foreach (var go in doomed) if (go != null) { QuitGuard.ReleaseHeld(go); UnityEngine.Object.DestroyImmediate(go); }   // a growing part gives back its block on Save & Quit first
                 pr.m_Branches.Clear();
+                Unlink(pr); CleanPending();
             }
+            guardBoostUntil = Time.time + 3f;
+        }
+
+        // Parts the mod removed may still be listed by a branch that stays (a scene-placed one, or one the update keeps). The game would use them
+        // next frame (a NullReferenceException in PlantStemNode.SetScale, which stops that branch's Update before it turns colliders back on).
+        public static int Unlink(PlantRoot pr)
+        {
+            int n = 0;
+            if (pr == null) return 0;
+            foreach (var b in pr.GetComponentsInChildren<PlantBranch>(true))
+            {
+                if (b == null) continue;
+                n += b.m_Stem.RemoveAll(s => s == null || s.m_StemObject == null);
+                n += b.m_ScalingStem.RemoveAll(s => s == null || s.m_StemObject == null);
+                n += b.m_Elements.RemoveAll(e => e == null || e.m_StemObject == null);
+                n += b.m_Branches.RemoveAll(x => x == null || x.m_Branch == null);
+                n += b.m_GrabbedNubs.RemoveAll(x => x == null);
+            }
+            pr.m_Branches.RemoveAll(b => b == null);
+            return n;
+        }
+
+        // A list of what is wrong with a plant's links after parts were removed (empty when nothing is): for the audit.
+        public static string DeadLinks(PlantRoot pr)
+        {
+            int stems = 0, elements = 0, branches = 0, nubs = 0, pending = 0;
+            foreach (var b in pr.GetComponentsInChildren<PlantBranch>(true))
+            {
+                if (b == null) continue;
+                foreach (var s in b.m_Stem) if (s == null || s.m_StemObject == null) stems++;
+                foreach (var s in b.m_ScalingStem) if (s == null || s.m_StemObject == null) stems++;
+                foreach (var e in b.m_Elements) if (e == null || e.m_StemObject == null) elements++;
+                foreach (var x in b.m_Branches) if (x == null || x.m_Branch == null) branches++;
+                foreach (var x in b.m_GrabbedNubs) if (x == null) nubs++;
+            }
+            for (var node = ColliderLOD.s_Pending.Root; node != null; node = node.Next) if (node.m_Subject == null || node.m_Owner == null) pending++;
+            if (stems + elements + branches + nubs + pending == 0) return "";
+            return "dead stems " + stems + ", elements " + elements + ", branches " + branches + ", nubs " + nubs + ", collider queue " + pending;
+        }
+
+        // ---- collision guard ------------------------------------------------------------------------------------------------------------
+        // A new stem starts with its colliders off (ColliderLOD.Start) and the game turns them on slowly (2 per frame, after a random wait), so after a
+        // rebuild the vine under a player can have no collision for seconds; a resize can also leave one off. Near me, a stem collider that stays off
+        // (or any, just after the mod rebuilt a plant) is turned on again, the way the game does for stems near the player.
+        public const float GuardRadius = 40f;
+        const float OffTooLong = 2f;
+        static readonly Dictionary<int, float> offSince = new Dictionary<int, float>();
+        static float guardBoostUntil;
+        public static int StatCollidersFixed, StatPendingCleaned;
+
+        public static int GuardCollision(Vector3 at, float radius, bool now)
+        {
+            int fixedN = 0; float r2 = radius * radius;
+            guardSeen.Clear();
+            if (now || Time.time >= guardCacheUntil) { stemCache.Clear(); guardCacheUntil = Time.time + 10f; }   // fresh after a load, prune or rebuild, and every 10 s
+            foreach (PlantBranch b in UnityEngine.Object.FindObjectsOfType(typeof(PlantBranch)))
+            {
+                if (b == null) continue;
+                bool riding = b.m_PlayerLockedOn;
+                foreach (var node in b.m_Stem)
+                {
+                    if (node == null || node.m_StemObject == null) continue;
+                    if ((node.m_StemObject.transform.position - at).sqrMagnitude > r2) continue;
+                    if (riding && node.m_Scaling) continue;          // the game keeps a resizing stem off while I ride its branch
+                    bool any = false;
+                    foreach (var c in CachedStemColliders(node))
+                    {
+                        if (c == null) continue;
+                        int key = c.GetInstanceID();
+                        if (c.enabled) { offSince.Remove(key); continue; }
+                        guardSeen.Add(key);
+                        float t0; if (!offSince.TryGetValue(key, out t0)) { t0 = Time.time; offSince[key] = t0; }
+                        if (!now && Time.time - t0 < OffTooLong) continue;
+                        c.enabled = true; offSince.Remove(key); fixedN++; any = true;
+                    }
+                    if (any && node.m_ColliderLOD != null) node.m_ColliderLOD.m_ExpectEnabled = true;
+                }
+            }
+            if (offSince.Count > 0)
+            {
+                guardDrop.Clear();
+                foreach (var k in offSince.Keys) if (!guardSeen.Contains(k)) guardDrop.Add(k);
+                foreach (var k in guardDrop) offSince.Remove(k);
+            }
+            int cleaned = 0;
+            if (now || Time.time >= nextPendingClean) { nextPendingClean = Time.time + 10f; cleaned = CleanPending(); }   // dead entries come from removed parts
+            StatCollidersFixed += fixedN; StatGuardScans++;
+            if (fixedN > 0 || cleaned > 0) CoopBehaviour.Log("collision: re-enabled " + fixedN + " plant colliders near " + at + (cleaned > 0 ? ", dropped " + cleaned + " removed colliders from the game's queue" : ""));
+            return fixedN;
+        }
+
+        // the scan is cheap when nothing was rebuilt: the colliders of a stem are looked up once (and again after a rebuild or every 10 s), the lists are reused
+        static readonly Dictionary<int, Collider[]> stemCache = new Dictionary<int, Collider[]>();
+        static readonly HashSet<int> guardSeen = new HashSet<int>();
+        static readonly List<int> guardDrop = new List<int>();
+        static float guardCacheUntil, nextPendingClean, nextGuard;
+        public static int StatGuardScans;
+        public const float GuardEvery = 2f;            // between full scans when nothing was rebuilt (every tick for 3 s after one)
+        static Collider[] CachedStemColliders(PlantStemNode node)
+        {
+            int key = node.m_StemObject.GetInstanceID();
+            Collider[] cs;
+            if (stemCache.TryGetValue(key, out cs)) return cs;
+            cs = StemColliders(node).ToArray();
+            stemCache[key] = cs;
+            return cs;
+        }
+
+        // the colliders the game itself turns on for a stem near the player: the stem's own and those its ColliderLOD looks after
+        static List<Collider> StemColliders(PlantStemNode node)
+        {
+            var list = new List<Collider>();
+            var own = node.m_StemObject.Collider;
+            if (own != null) list.Add(own);
+            if (node.m_ColliderLOD != null) foreach (var c in node.m_ColliderLOD.GetComponentsInChildren<Collider>(true)) if (c != null && !list.Contains(c)) list.Add(c);
+            return list;
+        }
+
+        // the game's queue of colliders to turn on keeps entries for removed ones for ever (and searches all of them every frame)
+        static int CleanPending()
+        {
+            int n = 0;
+            var node = ColliderLOD.s_Pending.Root;
+            while (node != null)
+            {
+                var next = node.Next;
+                if (node.m_Subject == null || node.m_Owner == null)
+                {
+                    node.Remove(); node.m_Subject = null; node.m_Owner = null; ColliderLOD.s_Pool.InsertAtEnd(node); n++;
+                }
+                node = next;
+            }
+            StatPendingCleaned += n;
+            return n;
+        }
+
+        // stem colliders near a point that are off (the riding exception as above): for the audit
+        public static int CollidersOff(Vector3 at, float radius, out int total)
+        {
+            int off = 0; total = 0; float r2 = radius * radius;
+            foreach (PlantBranch b in UnityEngine.Object.FindObjectsOfType(typeof(PlantBranch)))
+            {
+                if (b == null) continue;
+                foreach (var node in b.m_Stem)
+                {
+                    if (node == null || node.m_StemObject == null || (node.m_StemObject.transform.position - at).sqrMagnitude > r2) continue;
+                    if (b.m_PlayerLockedOn && node.m_Scaling) continue;
+                    foreach (var c in StemColliders(node)) { if (c == null) continue; total++; if (!c.enabled) off++; }
+                }
+            }
+            return off;
+        }
+
+        static void GuardTick()
+        {
+            bool boost = Time.time < guardBoostUntil;
+            if (!boost && Time.time < nextGuard) return;        // nothing rebuilt: a full scan every GuardEvery seconds is enough (a stem must be off 2 s anyway)
+            nextGuard = Time.time + GuardEvery;
+            var body = BodyPosition();
+            if (body.HasValue) GuardCollision(body.Value, GuardRadius, boost);
         }
 
         // The grown parts of a plant (their ids) travel after the update, so a receiver can tell which of ITS parts the sender no longer has. An in-place update never removes anything,
         // so without this a PC that once had more branches kept them for ever: extra physics objects, a plant that differs between players, and a game that gets slower.
         const int MaxKeep = 20000;
-        static void WriteKeep(BinaryWriter w, PlantRoot root)
+        static void WriteKeep(BinaryWriter w, PlantRoot root) { WriteKeep(w, root, null); }
+        static void WriteKeep(BinaryWriter w, PlantRoot root, string drop)
         {
             var ids = new List<string>();
             foreach (var si in root.GetComponentsInChildren<SaveInfo>(true))
-                if (si != null && si.gameObject != root.gameObject && si.m_runtimeSpawned && !string.IsNullOrEmpty(si.m_uniqueID) && si.m_uniqueID.Length <= 64) ids.Add(si.m_uniqueID);
+                if (si != null && si.gameObject != root.gameObject && si.m_runtimeSpawned && !string.IsNullOrEmpty(si.m_uniqueID) && si.m_uniqueID.Length <= 64 && si.m_uniqueID != drop) ids.Add(si.m_uniqueID);
             if (ids.Count > MaxKeep) ids.Clear();
             var ms = new MemoryStream(); var pw = new BinaryWriter(ms);
             pw.Write(ids.Count);
@@ -484,8 +882,15 @@ namespace CoopMod
             {
                 if (IdOf(pr) != rootId) continue;
                 var doomed = new List<GameObject>();
+                var held = HeldByMe();
                 foreach (var si in pr.GetComponentsInChildren<SaveInfo>(true))
-                    if (si != null && si.gameObject != pr.gameObject && si.m_runtimeSpawned && !keep.Contains(si.m_uniqueID)) doomed.Add(si.gameObject);
+                    if (si != null && si.gameObject != pr.gameObject && si.m_runtimeSpawned && !keep.Contains(si.m_uniqueID))
+                    {
+                        bool inHand = false;
+                        foreach (var h in held) if (h.IsChildOf(si.transform)) inHand = true;
+                        if (inHand) { CoopBehaviour.Log("shared: kept a plant part the sender does not have: my hand is on it"); continue; }   // never pull a nub or stem out of my hand
+                        doomed.Add(si.gameObject);
+                    }
                 if (doomed.Count == 0) return;
                 foreach (var go in doomed)
                 {
@@ -494,10 +899,20 @@ namespace CoopMod
                         if (k != null && k.gameObject != go && (keep.Contains(k.m_uniqueID) || !k.m_runtimeSpawned)) k.transform.parent = pr.transform;   // a part that stays never goes down with a part that goes
                     if (pr.m_CrownObject != null && pr.m_CrownObject.IsChildOf(go.transform)) pr.m_CrownObject.parent = pr.transform;
                 }
-                foreach (var go in doomed) if (go != null) UnityEngine.Object.DestroyImmediate(go);
-                pr.m_Branches.RemoveAll(b => b == null);
-                CoopBehaviour.Log("shared: removed " + doomed.Count + " parts my copy of the plant had and the sender does not");
+                foreach (var go in doomed) if (go != null) { QuitGuard.ReleaseHeld(go); UnityEngine.Object.DestroyImmediate(go); }   // a growing part gives back its block on Save & Quit first
+                int links = Unlink(pr); CleanPending();
+                guardBoostUntil = Time.time + 3f;
+                CoopBehaviour.Log("shared: removed " + doomed.Count + " parts my copy of the plant had and the sender does not" + (links > 0 ? " (and " + links + " links to them)" : ""));
             }
+        }
+
+        // what my hands hold now
+        static List<Transform> HeldByMe()
+        {
+            var list = new List<Transform>();
+            var me = GameObject.Find("Walkster");
+            if (me != null) foreach (var h in me.GetComponentsInChildren<BipedHandScript>()) if (h != null && h.grabbedObject != null) list.Add(h.grabbedObject);
+            return list;
         }
 
         static void ApplyPlant(byte[] msg, ulong from)
@@ -518,6 +933,13 @@ namespace CoopMod
             Parse(data);                              // a damaged update is thrown out here: the fallback below would otherwise destroy my plant for nothing
 
             if (from != 0 && IAmGuest && from != LeaderId) return;      // a guest takes plants only from the leader (who passes on every change that counts)
+            if (IAmGuest && (growing.ContainsKey(rootId) || finishing.Contains(rootId)))
+            {
+                // I ride a vine on this plant: the leader's copy has not got it yet and must not take it back from under me (the leader takes mine at the end)
+                StatHeldForGrow++;
+                if (!QuietRejects) CoopBehaviour.Log("shared: the leader's copy of plant " + rootId + " is ignored while I grow a vine on it");
+                return;
+            }
             if (from != 0 && IAmGuest && echoOf != 0 && echoOf == MyId)
             {
                 int myBase;
@@ -527,16 +949,32 @@ namespace CoopMod
                     StatEchoes++;
                     plantNumber[rootId] = number; waiting.Remove(rootId);
                     int firstSig; bool grewSince = !sentFirstSig.TryGetValue(rootId, out firstSig) || CurrentSignature(rootId) != firstSig;
-                    if (grewSince) dirty.Add(rootId);        // what I grew after that first send goes to the leader on the new number
+                    if (grewSince && growing.ContainsKey(rootId)) dirty.Add(rootId);        // what I grew after that first send goes to the leader on the new number (a guest sends only its own vines)
                     sentBase.Remove(rootId); sentFirstSig.Remove(rootId);
                     return;
                 }
             }
+            int leaderMine = 0; Lease lease = null;
             if (from != 0 && IAmLeader)
             {
                 if (MayTakeFrom != null && !MayTakeFrom(from)) return;     // not (or no longer) in my world
-                int mine; plantNumber.TryGetValue(rootId, out mine);
-                if (number != mine || LeaderHasUnsent(rootId))
+                int mine; plantNumber.TryGetValue(rootId, out mine); leaderMine = mine;
+                Lease ls;
+                if (leases.TryGetValue(rootId, out ls))
+                {
+                    if (ls.Holder != from) { StatStale++; return; }          // somebody else grows it now; they all get mine once that is done
+                    int real; realNumber.TryGetValue(rootId, out real);
+                    if (number < real || (!ls.Took && realChange.Contains(rootId)))
+                    {
+                        // their copy misses a vine I grew or took: taking it would cut that vine off. The lease ends; they get mine.
+                        StatStale++; StatLeaseRefused++; leases.Remove(rootId);
+                        outbox.Add(GrowMessage(GrowRevoked, rootId, from, 0)); ForceSend(rootId);
+                        CoopBehaviour.Log("shared: the vine plant of " + from + " was built on my copy " + number + ", older than my newest vine (" + real + "); not taken");
+                        return;
+                    }
+                    lease = ls;                                              // their vine: my own copy of this plant does not count meanwhile
+                }
+                else if (number != mine || realChange.Contains(rootId) || LeaderHasUnsent(rootId))
                 {
                     // built on an older copy of my plant: taking it would undo my newer growth. They get mine instead.
                     StatStale++;
@@ -547,8 +985,21 @@ namespace CoopMod
             }
 
             owner[rootId] = new KeyValuePair<ulong, float>(sender, Time.time + OwnerHold);   // they are growing it: I only receive until they are done
-            if (OnPlant(rootId)) { waiting[rootId] = new KeyValuePair<ulong, byte[]>(from, msg); if (!QuietRejects) CoopBehaviour.Log("shared: a friend plant update waits until I step off that plant"); return; }   // the owner is already set above, so my copy stays quiet meanwhile
-            try { if (TestFailInPlaceOnce) { TestFailInPlaceOnce = false; throw new InvalidOperationException("[test] injected in-place failure"); } LoadUpdate(data); Status = "a friend's plant updated"; StatApplied++; if (keep != null) PruneExtras(rootId, keep); }
+            if (!landing && OnPlant(rootId))
+            {
+                if (!waiting.ContainsKey(rootId)) waitSince[rootId] = Time.time;
+                waiting[rootId] = new KeyValuePair<ulong, byte[]>(from, msg);
+                if (!QuietRejects) CoopBehaviour.Log("shared: a friend plant update waits until I step off that plant");
+                return;     // the owner is already set above, so my copy stays quiet meanwhile
+            }
+            HashSet<int> attachedBefore = null; int connBefore = 0;
+            if (from != 0 && IAmLeader)
+            {
+                attachedBefore = AttachedProviders();
+                EnsureGrowingBeanstalk();
+                if (PlantBranch.CurrentlyGrowingBeanstalk != null) connBefore = PlantBranch.CurrentlyGrowingBeanstalk.m_connectedIslands;
+            }
+            try { if (TestFailInPlaceOnce) { TestFailInPlaceOnce = false; throw new InvalidOperationException("[test] injected in-place failure"); } LoadUpdate(data); Status = "a friend's plant updated"; StatApplied++; if (keep != null) PruneExtras(rootId, keep); guardBoostUntil = Time.time + 3f; }
             catch (Exception e)
             {
                 StatInPlaceFailed++;
@@ -581,9 +1032,13 @@ namespace CoopMod
             if (from != 0 && IAmLeader)
             {
                 // what I took goes to everybody, with a new number; another guest's copy built on the old one is now out of date
-                plantNumber[rootId] = number + 1;
+                plantNumber[rootId] = Math.Max(leaderMine, number) + 1;
                 int took; takenFrom[rootId] = new KeyValuePair<ulong, int>(from, number); takenSig[rootId] = lastSig.TryGetValue(rootId, out took) ? took : 0;
-                lastSent.Remove(rootId); ForceSend(rootId); RaiseIslandsToAttached();
+                realChange.Add(rootId);                                    // what I took is real growth: an older copy can never undo it
+                if (lease != null) { lease.Took = true; leaseEcho.Add(rootId); }   // passed on once their vine is done
+                else { lastSent.Remove(rootId); ForceSend(rootId); }
+                try { ConnectNewIslands(attachedBefore, connBefore); } catch (Exception e) { CoopBehaviour.Log("shared: islands of a friend's vine: " + Short(e)); }
+                RaiseIslandsToAttached();
             }
         }
 
@@ -683,6 +1138,7 @@ namespace CoopMod
             {
                 string id = IdOf(r);
                 if (id == null || !r.IsTrunk() || OwnedByOther(id)) continue;
+                if (IAmGuest && !growing.ContainsKey(id) && !finishing.Contains(id)) continue;   // a guest's vine brings the island with its plant; the leader grows the trunk for it
                 lastSent.Remove(id); dirty.Add(id);
             }
         }
@@ -778,16 +1234,41 @@ namespace CoopMod
         public static void TestRevert(string rootId, byte[] raw) { InitReflection(); RemovePlantCopy(rootId); LoadUpdate(raw); }
         public static void TestApplyWaiting() { ApplyWaiting(); }
         public static int TestWaiting { get { return waiting.Count; } }
+        public static int TestOnPlantState(string rootId) { return OnPlantState(rootId); }
+        // a plant update whose list of grown parts leaves one out: the receiver removes that part (PruneExtras)
+        public static byte[] TestMessageDropping(PlantRoot r, ulong sender, byte[] raw, string dropId)
+        {
+            byte[] comp = Compress(raw);
+            var ms = new MemoryStream(); var w = new BinaryWriter(ms);
+            w.Write(MsgPlant); w.Write(IdOf(r)); w.Write(sender); w.Write(raw.Length); w.Write(comp.Length); w.Write(Lz.Checksum(raw)); w.Write(comp); WriteKeep(w, r, dropId);
+            return ms.ToArray();
+        }
+        // one guard tick around a point, with the same "just rebuilt" rule GuardTick uses
+        public static int TestGuardAt(Vector3 at) { return GuardCollision(at, GuardRadius, Time.time < guardBoostUntil); }
+        public static void TestGuardTick() { GuardTick(); }
+        public static void EndGuardBoostForTest() { guardBoostUntil = 0f; nextGuard = 0f; }
+        public static Collider FirstStemColliderNear(Vector3 at)
+        {
+            foreach (PlantBranch b in UnityEngine.Object.FindObjectsOfType(typeof(PlantBranch)))
+            {
+                if (b == null || b.m_PlayerLockedOn) continue;
+                foreach (var node in b.m_Stem)
+                    if (node != null && node.m_StemObject != null && (node.m_StemObject.transform.position - at).sqrMagnitude < 100f)
+                        foreach (var c in StemColliders(node)) if (c != null && c.enabled) return c;
+            }
+            return null;
+        }
         public static void TestForget(string rootId) { owner.Remove(rootId); lastSig.Remove(rootId); lastSent.Remove(rootId); lastBytes.Remove(rootId); dirty.Remove(rootId); }
 
         // a guest not yet in the leader's world: whatever it noticed in its own world is thrown away, never sent
-        public static void Hold() { outbox.Clear(); lastSig.Clear(); dirty.Clear(); forced.Clear(); }
+        public static void Hold() { outbox.Clear(); lastSig.Clear(); dirty.Clear(); forced.Clear(); growing.Clear(); finishing.Clear(); StorySync.Hold(); }
 
         public static void Tick(ITransport broadcast)
         {
             if (TestSink != null) broadcast = TestSink;
             if (!Enabled || broadcast == null) return;
             Hook();
+            StorySync.Tick(broadcast);      // cutscenes and story flags (every frame: a skip must go out at once)
             foreach (var m in outbox) broadcast.SendReliable(m);
             outbox.Clear();
             if (Time.time < nextCheck) return;
@@ -795,8 +1276,10 @@ namespace CoopMod
             if (!WorldSync.InWorld() || !InitReflection()) return;
 
             ApplyWaiting();
+            try { TickGrowing(); if (IAmLeader) TickLeases(); } catch (Exception e) { CoopBehaviour.Log("shared: vines: " + Short(e)); }
             try { CheckIslands(); } catch (Exception e) { CoopBehaviour.Log("shared: islands: " + Short(e)); }
             try { CheckTeleporters(); } catch (Exception e) { CoopBehaviour.Log("shared: teleporters: " + Short(e)); }
+            try { GuardTick(); } catch (Exception e) { CoopBehaviour.Log("collision: " + Short(e)); }
             foreach (var m in outbox) broadcast.SendReliable(m);
             outbox.Clear();
 
@@ -807,8 +1290,10 @@ namespace CoopMod
                 if (id == null) continue;
                 int sig = Signature(root);
                 bool changedThisTick = false;
+                if (IAmLeader && leases.ContainsKey(id)) { lastSig[id] = sig; continue; }       // a friend grows a vine on it: their copy counts until they are done; I send nothing of it
                 float since; if (!lastSent.TryGetValue(id, out since)) since = -99f;
-                bool forceNow = IAmLeader && forced.Contains(id) && Time.time - since >= 2f;    // the leader passes on a plant it took (or answers an outdated one)
+                bool finish = IAmGuest && finishing.Contains(id);                               // my vine is done: the leader gets the final plant now
+                bool forceNow = finish || (IAmLeader && forced.Contains(id) && Time.time - since >= 2f);    // the leader passes on a plant it took (or answers an outdated one)
                 if (forceNow) { forced.Remove(id); lastSig[id] = sig; }
                 else
                 {
@@ -819,8 +1304,10 @@ namespace CoopMod
                     if (changedThisTick)
                     {
                         lastSig[id] = sig;
-                        // someone else is growing it: my copy changes only because I got their update. The leader's own growth always counts (and makes guests' copies old).
-                        if (IAmLeader && !settling) { dirty.Add(id); int n; plantNumber.TryGetValue(id, out n); plantNumber[id] = n + 1; }
+                        // someone else is growing it: my copy changes only because I got their update. The leader's own growth always counts (and makes guests'
+                        // copies old: LeaderHasUnsent, and the number goes up when it is sent).
+                        if (IAmLeader && !settling) dirty.Add(id);
+                        else if (IAmGuest) { if (!settling && growing.ContainsKey(id)) dirty.Add(id); }   // a guest sends only a vine it grows itself, never its trunk creeping up
                         else if (!settling && !OwnedByOther(id)) dirty.Add(id);
                     }
                     if (!dirty.Contains(id)) continue;
@@ -840,8 +1327,9 @@ namespace CoopMod
                     {
                         // in a party: numbered (the leader's is the real one). A guest plant I pass on unchanged says whose it is, so that guest does not put its own growth back.
                         KeyValuePair<ulong, int> tf; int ts; ulong echoOf = 0UL; int echoNumber = -1;
-                        if (IAmLeader && takenFrom.TryGetValue(id, out tf) && takenSig.TryGetValue(id, out ts) && ts == sig) { echoOf = tf.Key; echoNumber = tf.Value; }
-                        if (IAmLeader) { takenFrom.Remove(id); takenSig.Remove(id); }
+                        if (IAmLeader && takenFrom.TryGetValue(id, out tf) && takenSig.TryGetValue(id, out ts) && (ts == sig || leaseEcho.Contains(id))) { echoOf = tf.Key; echoNumber = tf.Value; }
+                        if (IAmLeader) { takenFrom.Remove(id); takenSig.Remove(id); leaseEcho.Remove(id); }
+                        if (IAmLeader && realChange.Contains(id)) { realNumber[id] = number; if (!growing.ContainsKey(id)) realChange.Remove(id); }   // older guest copies can no longer undo this
                         if (IAmGuest) { int b; if (!sentBase.TryGetValue(id, out b) || b != number) { sentBase[id] = number; sentFirstSig[id] = sig; } }
                         w.Write(MsgPlant2); w.Write(id); w.Write(MyId); w.Write(number); w.Write(echoOf); w.Write(echoNumber);
                     }
@@ -852,9 +1340,17 @@ namespace CoopMod
                     lastBytes[id] = comp.Length;
                     owner[id] = new KeyValuePair<ulong, float>(MyId, Time.time + OwnerHold);
                     if (!changedThisTick) dirty.Remove(id);
-                    CoopBehaviour.Log("shared: sent plant " + id + " (" + raw.Length + " bytes, " + comp.Length + " compressed)");
+                    CoopBehaviour.Log("shared: sent plant " + id + " (" + raw.Length + " bytes, " + comp.Length + " compressed)" + (finish ? ", the final one of my vine" : ""));
                 }
                 catch (Exception e) { CoopBehaviour.Log("shared: sending plant failed " + Short(e)); dirty.Remove(id); }
+                if (finish)
+                {
+                    // after the plant (same reliable channel, so it arrives after it): the leader passes it on now
+                    finishing.Remove(id); dirty.Remove(id);
+                    int n; plantNumber.TryGetValue(id, out n);
+                    broadcast.SendReliable(GrowMessage(GrowEnd, id, MyId, n));
+                    CoopBehaviour.Log("shared: my vine on plant " + id + " is done; told the leader");
+                }
             }
         }
 
@@ -873,6 +1369,8 @@ namespace CoopMod
                 else if (msg[0] == MsgIsland) ApplyIsland(msg, from);
                 else if (msg[0] == MsgTeleporter) ApplyTeleporter(msg);
                 else if (msg[0] == MsgPickup) ApplyPickup(msg);
+                else if (msg[0] == MsgGrow) ApplyGrow(msg, from);
+                else if (msg[0] == StorySync.Msg) StorySync.Handle(msg, from);
             }
             catch (Exception e) { StatRejected++; if (!QuietRejects) CoopBehaviour.Log("shared: rejected a bad message (" + Short(e) + ")"); }
         }

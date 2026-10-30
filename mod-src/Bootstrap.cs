@@ -33,9 +33,10 @@ namespace CoopMod
 
     // Co-op for up to MaxPeers other players. Every player connects to every other player (full mesh) and shows a copy of each of them.
     // The player with the lowest SteamID64 is the "host": the others copy that player's world when they join.
-    public class CoopBehaviour : MonoBehaviour, ISrLink
+    public partial class CoopBehaviour : MonoBehaviour, ISrLink
     {
-        const float SendInterval = 0.05f; // 20 Hz
+        const float SendInterval = 1f / 30f;   // 30 Hz, on real time (game time stands still in a menu and runs slow in a hitch)
+        const float GoneInterval = 0.2f;       // while my walkster is switched off (dead, loading): 5 Hz "gone" packets
         const int MaxPeers = 7;
         const byte MsgVisibility = MessageGate.MsgVisibility;
 
@@ -45,6 +46,9 @@ namespace CoopMod
         readonly List<string> peerSpecs = new List<string>();
         ulong myId; int myNumber; string myName;      // my own Steam name, cleaned
         float nextSteamTry, nextSend; uint sendSeq;
+        public static readonly uint MotionSession = NewSession();   // this run of my game: a restart gets a new one, so the others reset their count
+        static uint NewSession() { uint s = (uint)new System.Random().Next(1, int.MaxValue) ^ (uint)Environment.TickCount; return s == 0 ? 1u : s; }
+        static byte sendTp; static bool sentGone; static Vector3 lastSentPos; static float lastSentAt = -999f;
         bool pendJumpDown, pendJumpUp;
         Peer testPeer;                                  // F9 keyboard-driven test copy when there is no network
 
@@ -134,6 +138,7 @@ namespace CoopMod
             logName = "coopmod-steam.log";
             try { string lp = Here(logName); if (File.Exists(lp) && new FileInfo(lp).Length > 3 * 1024 * 1024) { string prev = Here("coopmod-steam.prev.log"); if (File.Exists(prev)) File.Delete(prev); File.Move(lp, prev); } } catch (Exception) { }   // the log never grows past a few MB
             StartScreen.m_skipIntros = !File.Exists(Here("coop-intro.txt"));   // straight to the start menu: the logo screens only cost time on every start (put coop-intro.txt next to the exe to see them)
+            StartWatchdog(); WatchdogFromAwake = true;     // a freeze before the first frame is caught too
             Log("CoopMod loaded; Unity " + Application.unityVersion + "; players to connect to: " + peerSpecs.Count);
             if (File.Exists(Here("coop-selftest.txt"))) { Log("self test requested (coop-selftest.txt)"); gameObject.AddComponent<SelfTest>(); }
             try   // an optional extra module that only exists on the owner's own PCs (never published): loaded when the file is there
@@ -172,8 +177,13 @@ namespace CoopMod
         void Update()
         {
             Perf.NewFrame();
-            if (Watchdog.Main == null) { Watchdog.Main = new Watchdog(Here(logName), 5000); Watchdog.Main.Start(); }
+            if (Watchdog.Main == null) StartWatchdog();
             Watchdog.Main.Beat();
+            Watchdog.Main.FullScreen = Screen.fullScreen;
+            ScreenGuardTick();
+            try { QuitGuard.Tick(Time.realtimeSinceStartup); } catch (Exception e) { Log("quit guard: " + e.GetType().Name + " " + e.Message); }
+            LeaderWatchTick();
+            BeatTick();
             float frameDt = Time.unscaledDeltaTime;
             if (frameDt > 0.08f && Online && Time.time > 10f && Time.time - lastHitchLog > 1f)
             {
@@ -202,6 +212,7 @@ namespace CoopMod
             PartyTick();
             if (Online && !chatOpen && !joinOpen && !hostMenuOpen && Input.GetKeyDown(KeyCode.T) && WorldSync.InWorld()) OpenChat();
             if (!Online && Time.realtimeSinceStartup >= nextSteamTry) TryStartSteam();
+            if (!Online && !CreatureSync.TestMode) CreatureSync.Idle();
             WorldSync.Transitions();
             try { Speedrun.Tick(); } catch (Exception e) { Log("speedrun: tick " + e.GetType().Name + " " + e.Message); }
             SpeedrunNet.Tick();
@@ -540,6 +551,8 @@ namespace CoopMod
                         p.ToldHaveWorld = 0;      // answered again below: a note the leader lost or forgot (it reconnected) is made good within 3 s
                     }
                     break;
+                case Route.LeaderLeft: HeardLeaderLeft(p, BitConverter.ToInt32(rel, 1)); break;
+                case Route.Creature: if (!Speedrun.Isolated) CreatureSync.Handle(p.Id, rel); break;   // the gate let it through from the host only
                 case Route.Oversized: Log("ignored an oversized message from " + p.Label); break;
                 case Route.SnapshotNotFromHost: Log("ignored world data from " + p.Label + " (not the host)"); break;
                 case Route.World: if (Speedrun.Isolated) break; if (WorldSync.IsSnapshot(rel)) WorldSync.EnterGuestMode(); WorldSync.Handle(p.Link, rel); break;
@@ -552,10 +565,11 @@ namespace CoopMod
         void NetTick()
         {
             netTickStart = Time.realtimeSinceStartup;
+            byte[] beat = TakeBeat();          // my leader beat for this second (only while I am in my own world)
             hub.Pump();
             if (Time.realtimeSinceStartup >= nextNames) { nextNames = Time.realtimeSinceStartup + 5f; RefreshNames(); }
             if (lanHub != null) lanHub.Pump();
-            if (peers.Count == 0) { SkinPersistTick(); return; }
+            if (peers.Count == 0) { SkinPersistTick(); if (!CreatureSync.TestMode) CreatureSync.Idle(); return; }
             Perf.Begin(); WorldSync.Tick(); Perf.End("WorldSync.Tick");
             Perf.Begin(); SkinPersistTick(); Perf.End("SkinPersistTick");
             if (Input.GetKeyDown(KeyCode.F4)) BringNextRemote();
@@ -574,6 +588,7 @@ namespace CoopMod
                     Buffer.BlockCopy(BitConverter.GetBytes(Time.realtimeSinceStartup), 0, pg, 1, 4);
                     p.Link.Send(pg);
                 }
+                if (beat != null && !p.IsBot) p.Link.Send(beat);
                 byte[] rel;
                 bool talk = MayTalkTo(p);
                 while ((rel = p.Link.ReceiveReliable()) != null)
@@ -609,6 +624,7 @@ namespace CoopMod
                     p.Link.SendReliable(m);
                 }
             Perf.End("SharedWorld.Tick");
+            Perf.Begin(); CreatureTick(amGuest); Perf.End("CreatureSync.Tick");
             Perf.Begin(); AutoPull(); Perf.End("AutoPull");
 
             Perf.Begin();
@@ -633,9 +649,9 @@ namespace CoopMod
                 pendJumpDown |= jd;
                 pendJumpUp |= handler.m_JumpInput.GetButtonUp("Jump");
                 bool menuOpen = Time.timeScale < 0.01f || (Singleton<PauseManager>.Exists && PauseManager.Paused);
-                if (Time.time >= nextSend)
+                if (Time.realtimeSinceStartup >= nextSend)
                 {
-                    nextSend = Time.time + SendInterval;
+                    nextSend = Time.realtimeSinceStartup + SendInterval - 0.004f;   // a little early: at 60 fps every second frame
                     var s = new PlayerState
                     {
                         seq = ++sendSeq,
@@ -653,22 +669,28 @@ namespace CoopMod
                     };
                     LocalFx.Fill(root, walker.body, s);   // jetpack flame and flower/leaf: visual only, sent also while the menu is open
                     s.events = FxOutbox.Current();
+                    StampMotion(s, walker, hands);
                     pendJumpDown = pendJumpUp = false;
                     LastSent = s;
                     broadcast.Send(s.Write());
                 }
             }
-            else if (Time.time >= nextSend)
+            else if (Time.realtimeSinceStartup >= nextSend)
             {
                 // my walkster is switched off (I just died: the game hides it until the respawn), so the death and the deadly
-                // landing still have to go out: the last pose I sent, standing still, with the events on it
-                var g = PoseWhileGone(LastSent, sendSeq + 1, FxOutbox.Current());
-                if (g != null) { nextSend = Time.time + SendInterval; sendSeq = g.seq; broadcast.Send(g.Write()); }
+                // landing still have to go out: the last pose I sent, standing still, with the events on it. In a world it also goes out
+                // without events (5 Hz, marked gone), so the others hold my copy still instead of guessing on from my last speed.
+                var ev = FxOutbox.Current();
+                bool inGame = Singleton<SceneProfile>.Exists && Singleton<SceneProfile>.Instance.m_playerIsInGame;
+                var g = PoseWhileGone(LastSent, sendSeq + 1, ev, inGame);
+                if (g != null) { nextSend = Time.realtimeSinceStartup + (ev.Length > 0 ? SendInterval : GoneInterval); sendSeq = g.seq; sentGone = true; broadcast.Send(g.Write()); }
             }
 
             // everybody -> their copies
             foreach (var p in peers) ReceiveState(p, root);
         }
+
+        public void ReceiveStateForTest(Peer p) { ReceiveState(p, null); }   // the audit feeds a made-up player's packets through the real receive path (no copy is made)
 
         void ReceiveState(Peer p, GameObject root)
         {
@@ -686,10 +708,26 @@ namespace CoopMod
                     Heard(p);
                     continue;
                 }
+                if (data.Length > 0 && data[0] == CreatureSync.MsgPose) { ReceiveCreatures(p, data); Heard(p); continue; }   // creature poses (an older version reads them as nothing)
+                if (data.Length > 0 && data[0] == LeaderBeat.Msg)
+                {
+                    uint bs, bq;
+                    if (LeaderBeat.Read(data, out bs, out bq) && LeaderBeat.Advance(p, bs, bq)) p.Beats++;   // only a newer beat of theirs counts as hearing from them
+                    Heard(p);
+                    continue;
+                }
                 var s = PlayerState.Read(data);
-                if (s == null || s.seq <= p.LastRecvSeq) continue;
-                if (s.pos.y < -30f) continue;   // that player is falling out of the world: do not chase them
-                p.LastRecvSeq = s.seq;
+                if (s == null) continue;
+                if (Time.realtimeSinceStartup - p.LastPacketTime > 10f) p.LastRecvSeq = 0;   // silent for a while: maybe a restart (an old version sends no session)
+                if (s.pos.y < -30f && s.seq > p.LastRecvSeq) continue;   // that player is falling out of the world: do not chase them
+                bool restarted;
+                if (!PoseOrder.Newest(p, s, out restarted))
+                {
+                    if (p.Driver != null && s.hasMotion && s.pos.y >= -30f) p.Driver.AddSample(s, p.SelfOffset);   // late or out of order: it still fills the path
+                    continue;
+                }
+                p.Beats++;                                  // a pose with a higher number than any before: only its sender moves that
+                if (restarted) { Log(p.Label + " restarted their game: their packets are counted from the start again"); if (p.Driver != null) p.Driver.Buffer.Reset(); }
                 float gap = Time.realtimeSinceStartup - p.LastStateTime; if (gap < 5f) { p.GapMax = Mathf.Max(p.GapMax, gap); p.GapSum += gap; p.GapN++; }
                 p.LastStateTime = Time.realtimeSinceStartup;
                 Heard(p);
@@ -705,7 +743,7 @@ namespace CoopMod
                 var d = p.Driver;
                 p.RemoteSkin = s.skin;
                 ObjectSync.SetRemoteHeld(p.Id, Speedrun.Isolated ? new PlayerState.Held[0] : s.held);   // a ghost racer never moves anything in my world
-                d.hasNet = true; d.netPos = s.pos + p.SelfOffset; d.netVel = s.vel; d.netTime = Time.time;
+                d.Take(s, p.SelfOffset);
                 d.input.move = s.move; d.input.camForward = s.camForward; d.input.jumpScale = s.jumpScale;
                 d.input.leftGrab = s.leftGrab; d.input.rightGrab = s.rightGrab;
                 d.input.jumpDown |= s.jumpDown; d.input.jumpUp |= s.jumpUp;
@@ -715,17 +753,69 @@ namespace CoopMod
             }
         }
 
+        // Creatures (CreatureSync): as the leader I run them for everybody in my world; as a guest in the leader's world mine follow theirs.
+        // In a race, outside a world or without the leader's world nobody's creatures are touched.
+        readonly List<CreatureSync.Viewer> creatureViewers = new List<CreatureSync.Viewer>();
+        void CreatureTick(bool amGuest)
+        {
+            if (CreatureSync.TestMode) return;
+            var role = CreatureSync.RoleFor(Speedrun.Isolated, WorldSync.InWorld(), AnyConnected, amGuest, WorldSync.HostWorldLoaded);
+            creatureViewers.Clear();
+            if (role == CreatureRole.Leader)
+                foreach (var p in peers)
+                    if (p.Driver != null && p.Driver.hasNet && CreatureSync.WantsCreatures(p.IsBot, p.MotionSession) && (p.IsBot || (p.Connected && Authority.MayApply(RoomUsed, IAmHost, InMyWorld(p)))))
+                        creatureViewers.Add(new CreatureSync.Viewer { Id = p.Id, Pos = p.Driver.netPos, Link = p.Link, Bot = p.IsBot });
+            var leader = role == CreatureRole.Guest ? HostPeer() : null;
+            if (role == CreatureRole.Guest && leader == null) role = CreatureRole.None;
+            CreatureSync.Tick(role, creatureViewers, leader != null ? leader.Link : null, leader != null ? leader.Id : 0UL);
+        }
+
+        // a creature pose packet: the leader's (I am a guest), or a guest's held creatures (I lead; only from a player in my world)
+        void ReceiveCreatures(Peer p, byte[] data)
+        {
+            if (Speedrun.Isolated || CreatureSync.TestMode) return;
+            bool fromHost = HostPeer() == p;
+            bool mayClaim = !fromHost && (p.IsBot || Authority.MayApply(RoomUsed, IAmHost, InMyWorld(p)));
+            bool hasPos = p.Driver != null && p.Driver.hasNet;
+            CreatureSync.HandlePose(p.Id, data, fromHost, mayClaim, hasPos ? p.Driver.netPos : Vector3.zero, hasPos);
+        }
+
         public static PlayerState LastSent;   // the last pose packet of my walkster (sent again with my events while it is switched off)
 
-        // A pose packet for while my walkster is gone: where I last was, no input, nothing held or flying, my waiting events. Null when nothing waits.
-        public static PlayerState PoseWhileGone(PlayerState last, uint seq, FxEvent[] events)
+        public static PlayerState PoseWhileGone(PlayerState last, uint seq, FxEvent[] events) { return PoseWhileGone(last, seq, events, false); }
+
+        // A pose packet for while my walkster is gone: where I last was, no input, nothing held or flying, my waiting events, marked gone.
+        // Null when there is no last pose, or when nothing waits and no heartbeat is wanted.
+        public static PlayerState PoseWhileGone(PlayerState last, uint seq, FxEvent[] events, bool heartbeat)
         {
-            if (last == null || events == null || events.Length == 0) return null;
+            if (last == null || events == null || (events.Length == 0 && !heartbeat)) return null;
             return new PlayerState
             {
                 seq = seq, pos = last.pos, vel = Vector3.zero, camForward = last.camForward, move = Vector2.zero,
                 skin = last.skin, jumpScale = last.jumpScale, vis = last.vis ?? new byte[0], events = events,
+                hasMotion = true, session = MotionSession, sendMs = (uint)(Time.realtimeSinceStartup * 1000.0), mflags = MotionWire.Gone, tp = sendTp,
             };
+        }
+
+        // The motion block of my pose packet. A jump further than a running BUD could make since the last packet (a respawn, a teleporter)
+        // or the first pose after being gone counts as a teleport, so the others put my copy there at once instead of sliding it across.
+        static void StampMotion(PlayerState s, BipedWalkScript walker, BipedHandsScript hands)
+        {
+            float now = Time.realtimeSinceStartup;
+            byte f = walker.m_inAir ? MotionWire.InAir : MotionWire.Grounded;
+            if (hands != null && hands.IsClimbing()) f |= MotionWire.Climbing;
+            if (s.jet || s.fly != 0) f |= MotionWire.Flying;
+            float since = now - lastSentAt;
+            if (TeleportedSince(lastSentPos, s.pos, s.vel, since, lastSentAt > 0f, sentGone)) { sendTp++; f |= MotionWire.Teleported; }
+            sentGone = false; lastSentPos = s.pos; lastSentAt = now;
+            s.hasMotion = true; s.session = MotionSession; s.sendMs = (uint)(now * 1000.0); s.mflags = f; s.tp = sendTp;
+        }
+
+        public static bool TeleportedSince(Vector3 lastPos, Vector3 pos, Vector3 vel, float since, bool hadLast, bool wasGone)
+        {
+            if (!hadLast) return false;
+            if (wasGone) return true;
+            return (pos - lastPos).magnitude > 6f + vel.magnitude * Mathf.Max(since, 0.05f) * 2f;
         }
 
         // Each event comes in several packets in a row: only one with a newer number than the last one shown is played.
@@ -751,7 +841,7 @@ namespace CoopMod
             if (Time.time < p.NextSyncLog || p.Driver == null || p.GapN <= 0) return;
             p.NextSyncLog = Time.time + 3f;
             if (p.Driver.errN > 0 && (p.Driver.errMax > 0.8f || p.GapMax > 0.2f))
-                Log("sync " + p.Label + ": packets avg gap " + (p.GapSum / p.GapN * 1000f).ToString("F0") + " ms, max " + (p.GapMax * 1000f).ToString("F0") + " ms; err avg " + (p.Driver.errSum / p.Driver.errN).ToString("F2") + " max " + p.Driver.errMax.ToString("F2") + " m; fps " + (1f / Mathf.Max(0.0001f, Time.deltaTime)).ToString("F0") + "; rtt avg " + (p.RttN > 0 ? (p.RttSum / p.RttN).ToString("F0") : "?") + " max " + p.RttMax.ToString("F0") + " ms; " + p.Link.Diagnostics());
+                Log("sync " + p.Label + ": packets avg gap " + (p.GapSum / p.GapN * 1000f).ToString("F0") + " ms, max " + (p.GapMax * 1000f).ToString("F0") + " ms; err avg " + (p.Driver.errSum / p.Driver.errN).ToString("F2") + " max " + p.Driver.errMax.ToString("F2") + " m; fps " + (1f / Mathf.Max(0.0001f, Time.deltaTime)).ToString("F0") + "; rtt avg " + (p.RttN > 0 ? (p.RttSum / p.RttN).ToString("F0") : "?") + " max " + p.RttMax.ToString("F0") + " ms; delay " + (p.Driver.Buffer.Delay * 1000f).ToString("F0") + " ms, jitter " + (p.Driver.Buffer.Jitter * 1000f).ToString("F0") + " ms; frozen " + p.Driver.FrozenTime.ToString("F1") + " s (woken " + p.Driver.Unfreezes + "), snaps " + p.Driver.Snaps + (p.Driver.Snaps > 0 ? " (last: " + p.Driver.LastSnap + ")" : "") + ", far " + (p.Driver.Far ? "yes" : "no") + "; " + p.Link.Diagnostics());
             p.RttSum = 0f; p.RttMax = 0f; p.RttN = 0;
             p.GapMax = 0f; p.GapSum = 0f; p.GapN = 0; p.Driver.errSum = 0f; p.Driver.errN = 0; p.Driver.errMax = 0f;
         }
@@ -1363,6 +1453,8 @@ namespace CoopMod
         {
             if (lobby == null) return;
             bool was = lobby.InLobby;
+            if (byMe && was && lobby.IsOwner && WorldSync.InGameOrLoading()) SendLeftWorld("I left the party");   // my guests go back to the start menu
+            if (byMe && was && !lobby.IsOwner) leaderWatchOff = true;                                               // I left on purpose: no "the leader left" for me
             following = false; hostStarting = false;
             if (was) { lobby.SetMine("ready", "0"); lobby.Leave(); }
             if (byMe) lobby.Status = "you left the party";
@@ -1388,6 +1480,7 @@ namespace CoopMod
         {
             if (Time.realtimeSinceStartup - p.LastPacketTime > 10f)
             {
+                p.LastRecvSeq = 0;   // a restarted game counts its packets from 1 again (an old version sends no session to tell)
                 p.ConnectedAt = Time.realtimeSinceStartup; p.AutoPulled = false; p.HasMyWorld = 0; p.ToldHaveWorld = 0; p.NextEpochSend = 0f;
                 // the leader was gone for a while: what I have may have missed their changes, so their world is copied again before mine counts
                 ulong lead = HostIdNow();

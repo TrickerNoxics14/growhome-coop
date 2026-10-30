@@ -94,15 +94,6 @@ static partial class Program
         Check("BORROWER-DETECT", live != null && LastOwner(live) != null, "this PC's Grow Home install manifest can be read", live == null ? "not found" : "LastOwner " + LastOwner(live));
     }
 
-    static Process StartFake(string exePath, string args)
-    {
-        Directory.CreateDirectory(Path.GetDirectoryName(exePath));
-        if (!File.Exists(exePath)) File.Copy(Path.Combine(Environment.SystemDirectory, "ping.exe"), exePath);
-        var p = Process.Start(new ProcessStartInfo(exePath, args) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true });
-        Thread.Sleep(500);
-        return p;
-    }
-
     static void AuditRunningGames(string tmp)
     {
         string mine = ImagePath(Process.GetCurrentProcess().Id);
@@ -138,7 +129,7 @@ static partial class Program
         int took;
         // the mod says it loaded while the launcher is watching
         int before = ModLoadedCount();
-        var writer = new Thread(() => { Thread.Sleep(1500); File.AppendAllText(ModLogPath, "CoopMod loaded; Unity 4.6.1f1\n"); });
+        var writer = Bg("AuditStart worker", () => { Thread.Sleep(1500); File.AppendAllText(ModLogPath, "CoopMod loaded; Unity 4.6.1f1\n"); });
         writer.Start();
         var sw = Stopwatch.StartNew();
         var loaded = WaitForMod(before, 20, true, out took);
@@ -224,6 +215,22 @@ static partial class Program
         // deleting the copy must not touch the original
         DeleteGameCopy(dst);
         Check("INSTALL-FAST", !Directory.Exists(dst) && Sha256(srcLevel) == hashLevel && File.Exists(srcExe), "deleting the co-op copy leaves every original file intact", "");
+
+        // a read-only original that the copy links to keeps its read-only flag when the copy is deleted (a link shares the flags), and a read-only
+        // real copy is still deleted
+        string roSrc = Path.Combine(tmp, "ro-original.assets"), roCopy = Path.Combine(tmp, "ro-copy"), roLink = Path.Combine(roCopy, "GrowHome_Data", "ro.assets"), roReal = Path.Combine(roCopy, "real.txt");
+        File.WriteAllText(roSrc, "original data");
+        Directory.CreateDirectory(Path.GetDirectoryName(roLink));
+        bool roLinked = CreateHardLink(roLink, roSrc, IntPtr.Zero);
+        File.WriteAllText(roReal, "a real copy"); File.SetAttributes(roReal, FileAttributes.ReadOnly);
+        File.SetAttributes(roSrc, File.GetAttributes(roSrc) | FileAttributes.ReadOnly);
+        string roErr = "";
+        try { DeleteGameCopy(roCopy); } catch (Exception e) { roErr = e.Message; }
+        bool roKept = File.Exists(roSrc) && (File.GetAttributes(roSrc) & FileAttributes.ReadOnly) != 0 && File.ReadAllText(roSrc) == "original data";
+        bool roGone = !Directory.Exists(roCopy) && Directory.GetDirectories(tmp, "ro-copy*").Length == 0;
+        try { File.SetAttributes(roSrc, FileAttributes.Normal); File.Delete(roSrc); } catch { }
+        Check("INSTALL-FAST", roLinked && roKept && roGone && roErr == "", "deleting the co-op copy leaves a read-only original it links to read-only (the flag is not cleared through the link), and read-only files of the copy are still deleted",
+            "linked=" + roLinked + ", original still read-only=" + roKept + ", copy gone=" + roGone + (roErr.Length > 0 ? ", error " + roErr : ""));
 
         // a drive that cannot link: everything is copied and still works
         CopyGame(src, dst2, false);

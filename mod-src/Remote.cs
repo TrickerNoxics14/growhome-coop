@@ -21,9 +21,18 @@ namespace CoopMod
         public bool hasNet;
         public Vector3 netPos, netVel;
         public float netTime;
-        public const float TeleportDist = 10f;
-        float nextLagLog;
+        float nextLagLog, nextSnapLog;
         public float errSum, errMax; public int errN;
+        // the path this copy follows (see PoseBuffer), and how it moves along it
+        public readonly PoseBuffer Buffer = new PoseBuffer();
+        readonly Follower follow = new Follower();
+        readonly SnapRule snapRule = new SnapRule();
+        PoseOut cur; float curAt; bool haveCur, justEnabled;
+        public bool Far;                         // far away or off screen: moved straight along the path, no physics
+        public float FrozenTime;                 // time the game had this copy frozen (it never should)
+        public int Snaps, Unfreezes, FarSteps, NearSteps;
+        public string LastSnap = "";
+        Rigidbody[] bodies;
         Controllable c;
         BipedHandsScript hands;
         SmoothDirection look = new SmoothDirection();
@@ -45,6 +54,17 @@ namespace CoopMod
         void Start()
         {
             c = GetComponent<Controllable>();
+            int terrain = LayerMask.NameToLayer("Terrain");
+            if (terrain >= 0)
+            {
+                int mask = 1 << terrain;
+                Buffer.Ground = delegate (Vector3 from, out float y)
+                {
+                    RaycastHit hit; y = 0f;
+                    if (!Physics.Raycast(from, Vector3.down, out hit, 60f, mask)) return false;
+                    y = hit.point.y; return true;
+                };
+            }
             hands = GetComponent<BipedHandsScript>();
             look.SetTrackingRate(lookRate);
             var t = transform.FindChild("AudioSources/Voice");
@@ -59,7 +79,7 @@ namespace CoopMod
         }
 
         // Coroutines stop while the copy is switched off (dead, or saved from the chunker): start again each time it comes back.
-        void OnEnable() { StartCoroutine(JumpSteps()); }
+        void OnEnable() { justEnabled = true; KeepAwake(); StartCoroutine(JumpSteps()); }
         void OnDisable() { if (windowOpen) CloseWindow(); }
         void OnDestroy() { if (windowOpen) CloseWindow(); }
 
@@ -74,6 +94,7 @@ namespace CoopMod
             {
                 yield return wait;
                 if (windowOpen) CloseWindow();
+                KeepAwake();
                 if (!jumpQueued || c == null) continue;
                 if (Time.time - jumpQueuedAt > 0.3f) { jumpQueued = false; continue; }   // waited too long behind another copy: dropped
                 if (JumpWindow.Owner != null) continue;                                    // another copy jumps in this step: next one
@@ -117,36 +138,143 @@ namespace CoopMod
             if (Camera.main != null) input.camForward = Camera.main.transform.forward;
         }
 
-        // Direct speed correction: the input-driven walk alone cannot close a gap quickly, so steer the body's horizontal velocity toward the real player.
-        void FixedUpdate()
+        // A new pose packet of this copy's player (the newest one: also the inputs). Old packets without a motion block use their arrival time.
+        public void Take(PlayerState s, Vector3 offset)
         {
-            if (!hasNet || c == null || c.body == null) return;
-            Vector3 predicted = netPos + netVel * (Time.time - netTime);
-            Vector3 full = predicted - c.body.position;
-            if (full.magnitude > 14f) return;   // Update() teleports in that case
-            Vector3 err = full; err.y = 0f;
-            float horiz = err.magnitude;
-            // Vertical catch-up: the peer is climbing or jumping and the input-driven walk cannot follow a rock face on its own.
+            hasNet = true; netPos = s.pos + offset; netVel = s.vel; netTime = Time.time;
+            AddSample(s, offset);
+        }
+
+        public void AddSample(PlayerState s, Vector3 offset)
+        {
+            double now = Time.realtimeSinceStartup;
+            if (s.hasMotion) Buffer.Add(s.session, s.seq, s.sendMs / 1000.0, s.pos + offset, s.vel, s.mflags, s.tp, now);
+            else Buffer.Add(0u, s.seq, now, s.pos + offset, s.vel, 0, 0, now);
+        }
+
+        Rigidbody[] Bodies()
+        {
+            if (bodies == null || bodies.Length == 0 || bodies[0] == null) bodies = transform.root.GetComponentsInChildren<Rigidbody>(true);
+            return bodies;
+        }
+
+        // The game puts a walkster that is not mine to sleep (frozen) when it thinks the camera cannot see it. A copy must never sleep:
+        // its player is still moving. Set before every physics step; a copy found asleep is woken.
+        void KeepAwake()
+        {
+            var w = c as BipedWalkScript;
+            if (w == null) return;
+            if (InhibitField != null) InhibitField.SetValue(w, true);
+            if (w.m_distanceDisabled)
+            {
+                foreach (var rb in Bodies()) if (rb != null) rb.isKinematic = false;
+                w.m_distanceDisabled = false;
+                Unfreezes++;
+            }
+        }
+
+        PoseOut Sample(float dt)
+        {
+            if (Buffer.Count > 0) return Buffer.Sample(Time.realtimeSinceStartup, dt);
+            // no packet in the buffer (a test set the pose by hand): the last pose, guessed ahead for at most a quarter second
+            var o = new PoseOut();
+            o.valid = true;
+            o.pos = netPos + netVel * Mathf.Clamp(Time.time - netTime, 0f, PoseBuffer.MaxAhead);
+            o.vel = Time.time - netTime < PoseBuffer.MaxAhead ? netVel : Vector3.zero;
+            return o;
+        }
+
+        // Height is followed fully while they climb, fly or are in the air (the copy has no grip or lift of its own), or when it is far off.
+        bool FollowHeight(Vector3 err)
+        {
+            if (Mathf.Abs(err.y) > 1.5f) return true;
+            if (Buffer.Session != 0 && Buffer.Count > 0) return (cur.flags & (MotionWire.InAir | MotionWire.Climbing | MotionWire.Flying)) != 0;
             bool grabbing = input.leftGrab || input.rightGrab || (hands != null && hands.IsClimbing());
             bool flying = input.airAbility && Time.time - netTime < RemoteFx.Timeout;   // stale news: back to normal walking
-            bool followY = grabbing || flying || Mathf.Abs(full.y) > 2f;
-            if (horiz < 0.3f && !(followY && Mathf.Abs(full.y) > 0.3f)) return;
-            Vector3 v = c.body.velocity;
-            Vector3 want = netVel + Vector3.ClampMagnitude(err * 6f, 12f); want.y = 0f;
-            Vector3 h = new Vector3(v.x, 0f, v.z);
-            h = Vector3.Lerp(h, want, Mathf.Clamp01(0.2f + horiz * 0.15f));
-            float vy = v.y;
-            if (followY)
+            return grabbing || flying;
+        }
+
+        // Once a frame: where the path is now, near or far, and a jump only on a teleport mark or a big error that stays.
+        void Steer(float dt)
+        {
+            if (c.body == null) return;
+            var o = Sample(dt);
+            if (!o.valid) return;
+            cur = o; curAt = Time.time; haveCur = true;
+            Vector3 at = c.body.position;
+            Vector3 err = o.pos - at;
+            float horiz = new Vector2(err.x, err.z).magnitude;
+            errSum += horiz; errN++; if (horiz > errMax) errMax = horiz;
+            var cam = Camera.main;
+            if (cam != null)
             {
-                float wantY = netVel.y + Mathf.Clamp(full.y * 6f, -12f, 12f);
-                vy = Mathf.Lerp(v.y, wantY, Mathf.Clamp01(0.3f + Mathf.Abs(full.y) * 0.1f));
+                float d = Vector3.Distance(cam.transform.position, at);
+                Vector3 vp = cam.WorldToViewportPoint(at);
+                bool onScreen = vp.z > 0f && vp.x > -0.2f && vp.x < 1.2f && vp.y > -0.2f && vp.y < 1.2f;
+                Far = Far ? (d > 18f || (!onScreen && d > 6f)) : (d > 22f || (!onScreen && d > 10f));
             }
-            c.body.velocity = new Vector3(h.x, vy, h.z);
+            else Far = false;
+            bool back = justEnabled; justEnabled = false;
+            if (snapRule.Step(err.magnitude, o.vel.magnitude, o.teleport || (back && err.magnitude > 1.5f), dt))
+            {
+                SnapTo(o, o.teleport ? "teleport mark" : (back ? "shown again" : "far off"), err);
+                return;
+            }
+            c.body.interpolation = Far ? RigidbodyInterpolation.None : RigidbodyInterpolation.Interpolate;
+            if (Far)
+            {
+                if (!follow.Init) follow.Reset(at, c.body.velocity);
+                follow.Step(o, dt);
+                transform.root.position += follow.Pos - at;
+                FarSteps++;
+            }
+            else { follow.Reset(at, c.body.velocity); NearSteps++; }
+            if (horiz > 3f && Time.time >= nextLagLog)
+            {
+                nextLagLog = Time.time + 1f;
+                CoopBehaviour.Log("lag: err=" + horiz.ToString("F1") + " cloneSpeed=" + c.body.velocity.magnitude.ToString("F1") + " pathSpeed=" + o.vel.magnitude.ToString("F1")
+                    + " far=" + Far + " ahead=" + o.ahead.ToString("F2") + " delay=" + (Buffer.Delay * 1000f).ToString("F0") + "ms climbing=" + (hands != null && hands.IsClimbing())
+                    + " move=" + input.move.magnitude.ToString("F2") + " age=" + (Time.time - netTime).ToString("F2"));
+            }
+        }
+
+        // Every part of the copy straight to the path, with the path's speed.
+        void SnapTo(PoseOut o, string why, Vector3 err)
+        {
+            transform.root.position += o.pos - c.body.position;
+            foreach (var rb in Bodies()) if (rb != null && !rb.isKinematic) rb.velocity = o.vel;
+            follow.Reset(o.pos, o.vel);
+            Snaps++; LastSnap = why;
+            if (Time.time >= nextSnapLog) { nextSnapLog = Time.time + 1f; CoopBehaviour.Log("remote snap (" + why + "), err=" + err.magnitude.ToString("F1") + " y=" + err.y.ToString("F1")); }
+        }
+
+        // Near copies: one spring toward the path with its speed fed forward (the only pull; the game's walk is asked for the same speed).
+        // Far copies: their parts get the path's speed, so physics does not move them away between frames.
+        void FixedUpdate()
+        {
+            KeepAwake();
+            if (!hasNet || c == null || c.body == null || !haveCur) return;
+            if (c.body.isKinematic) FrozenTime += Time.fixedDeltaTime;
+            float ahead = Mathf.Clamp(Time.time - curAt, -0.1f, 0.1f);
+            Vector3 tgt = cur.pos + cur.vel * ahead;
+            Vector3 err = tgt - c.body.position;
+            if (Far)
+            {
+                foreach (var rb in Bodies()) if (rb != null && !rb.isKinematic) rb.velocity = cur.vel;
+                c.body.useGravity = false;
+                return;
+            }
+            bool followY = FollowHeight(err);
+            c.body.useGravity = !followY;
+            Vector3 want = Follower.Want(err, cur.vel, 6f);
+            Vector3 v = c.body.velocity;
+            c.body.velocity = new Vector3(want.x, followY ? want.y : v.y, want.z);
         }
 
         void Update()
         {
             if (c == null) return;
+            if (hasNet) Steer(Time.unscaledDeltaTime);
             if (mirrorFrom != null) c.jumpEnabled = mirrorFrom.jumpEnabled;
             // a hard bump must not "kill" the copy: the game would cut MY voice line and count a death in MY stats (BipedWalkScript.HandleCollision)
             var bw = c as BipedWalkScript;
@@ -189,25 +317,11 @@ namespace CoopMod
             look.Value = (anyInput && !grabbingAny) ? expectedMove.normalized : fwd;
             Vector3 target = expectedMove * maxSpeed;
             if (target.magnitude > maxSpeed) target *= maxSpeed / target.magnitude;
-            if (hasNet)
+            if (hasNet && haveCur)
             {
-                Vector3 predicted = netPos + netVel * (Time.time - netTime);
-                Vector3 err = predicted - c.body.position;
-                float horiz = new Vector2(err.x, err.z).magnitude;
-                errSum += horiz; errN++; if (horiz > errMax) errMax = horiz;
-                if (err.magnitude > 14f) { CoopBehaviour.Log("remote teleport, err=" + horiz.ToString("F1") + " y=" + err.y.ToString("F1")); transform.root.position += err; }
-                else
-                {
-                    err.y = 0f;
-                    target += Vector3.ClampMagnitude(err * 3f, 8f);
-                    if (horiz > 3f && Time.time >= nextLagLog)
-                    {
-                        nextLagLog = Time.time + 1f;
-                        CoopBehaviour.Log("lag: err=" + horiz.ToString("F1") + " cloneSpeed=" + c.body.velocity.magnitude.ToString("F1") + " netSpeed=" + netVel.magnitude.ToString("F1")
-                            + " inAir=" + c.m_inAir + " grab=" + (hands != null && (hands.hand[0].grabbing || hands.hand[1].grabbing)) + " climbing=" + (hands != null && hands.IsClimbing())
-                            + " move=" + input.move.magnitude.ToString("F2") + " age=" + (Time.time - netTime).ToString("F2"));
-                    }
-                }
+                // the walk animation is asked for the path's own speed, so the game's walk and my steering pull the same way
+                Vector3 hv = cur.vel; hv.y = 0f;
+                target = hv.magnitude > maxSpeed ? hv * (maxSpeed / hv.magnitude) : hv;
             }
             c.desiredMove = Vector3.zero;
             c.lookVector = look.Value;

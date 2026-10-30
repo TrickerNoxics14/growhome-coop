@@ -185,6 +185,7 @@ static partial class Program
         string args = "-screen-width 1280 -screen-height 720 -popupwindow";
         if (!string.IsNullOrWhiteSpace(existing) && !IsOurLaunchOption(existing))
             args = existing.Replace("%command%", "").Trim();      // keep whatever the person already had there
+        args = LaunchArgs(args, FullscreenAllowed(), false);      // always a window (a frozen fullscreen game leaves a black screen)
         return "\"" + exe + "\" " + args + " %command%";
     }
 
@@ -355,6 +356,8 @@ static partial class Program
         string current; try { current = GetLaunchOption(text, AppId); } catch (FormatException e) { Log("localconfig.vdf not understood: " + e.Message); Say("Steam's settings file looks different than expected; not changing it."); return false; }
         string wanted = WantedLaunchOption(current);
         if (undo ? !IsOurLaunchOption(current) : current == wanted) return true;
+        // an option of ours from an older launcher still starts this co-op copy: no Steam restart just to change its window arguments
+        if (!undo && IsOurLaunchOption(current) && current.IndexOf("\"" + Path.Combine(gameDir, "GrowHome.exe") + "\"", StringComparison.OrdinalIgnoreCase) >= 0) { Log("kept the older co-op launch option: " + current); return true; }
         if (!undo && !string.IsNullOrEmpty(current) && current.Contains("%command%") && !IsOurLaunchOption(current)) { Say("Grow Home already has a Steam launch option with a wrapper; not replacing it."); Log("foreign wrapper launch option: " + current); return false; }
 
         Say("");

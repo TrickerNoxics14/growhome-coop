@@ -113,3 +113,71 @@ SR-RACE-FSM           | game   | a race arms, waits at most 15 s for READY (late
 SR-RACE-LOOP          | game   | a whole race with fake players: own slots, READY, one GO with every start on its frame, live opponent progress, OFFLINE/DNF, ranked results, cancel and version mismatch
 SR-COOP-TIMER         | game   | a co-op run has the leader's timer only, shown by members within 50 ms; members' splits and databank entries count once and only from the leader's world; HOST LOST; exact final time
 SR-RACE-ISOLATION     | game   | in a speedrun slot no plant, crystal, island, teleporter, pickup, world, epoch or have-world message from another player changes anything, and my world is never sent
+HANG-GUARD            | game   | the hang guard starts with the game: a frozen game gets the mouse back (fullscreen is minimized) and is ended after its limit, once; a loading game gets longer; a PC that slept is no freeze; the game runs in a window
+QUIT-GUARD            | game   | Save & Quit comes back when the game's quit/pause block counters were left raised with nothing really blocking; a real block is kept; removed growing plant parts give their block back
+PAUSE-ROWS            | game   | the pause menu has Save & Quit (working) in every state, CO-OP always, SPEEDRUN only during an active run, and every row fits inside the menu
+LEADER-LEFT           | game   | when the leader leaves its world (says so, leaves the party, back to the start screen, or its heartbeat stops advancing) every guest goes back to the start menu with THE LEADER LEFT THE WORLD, once; races and blips are left alone; my own saves untouched
+MOVE-WIRE             | game   | the pose packet carries the sender's run (session), send time, gone/climbing/in-air flags and a teleport count in a block old versions read and ignore; cut-off or damaged blocks are refused; a gone player still sends; respawns are marked
+MOVE-BUFFER           | game   | a copy's packets are kept in send order without repeats, the clock difference and an 80-250 ms delay are found from the link, the path is blended between packets and guessed ahead at most 250 ms
+MOVE-SESSION          | game   | a friend who restarts the game (packet numbers from 1 again) is followed at once instead of standing still; old versions are still ordered
+MOVE-SIM              | game   | run, circle, start/stop, jump arcs, a 30 m fall, climbing and a respawn over perfect, jittery, lossy, bursty, reordered, 30 fps, gap and restart links: small error, no frame jumps, no stand-still, a teleport only when marked
+MOVE-FAR              | game   | a copy 40 m behind my camera keeps running along its path: the game never freezes it and it never jumps
+MOVE-NEAR             | game   | a copy in front of me follows its path with one steering pull, never frozen and without jumps
+LAUNCH-WINDOWED       | exe    | the game always starts in a window (also with own arguments and Steam's launch option); a small ordinary window after a freeze
+STEAM-READY           | exe    | a game starts only when Steam is signed in, its pid is a running Steam, its web helper is up, and a fresh Steam stayed ready a while
+LAUNCH-HANDOFF        | exe    | when a direct start ends and Steam brings up the regular game instead, the launcher closes that game again within seconds
+SINGLE-INSTANCE       | exe    | only one launcher runs at a time
+NO-FOCUS-STEAL        | exe    | the launcher never comes up over a running game unless it has a question
+HANG-NO-FALSE-KILL    | exe    | a running co-op game is called frozen only after 10 s not responding; closing it is never the default
+UPDATE-ATOMIC         | exe    | the mod is replaced in one step (a broken swap leaves the old one), never while the co-op game runs; a staged update waits
+INSTALL-IN-USE        | exe    | a co-op copy in use is not deleted at all, and fully once free
+PLANT-ONPLANT-BODY    | game   | "is my walkster on this plant" is measured from the body (the Walkster object stays at the level start); riding a vine always counts
+PLANT-GROW-LEASE      | game   | a guest growing a vine: the leader takes its plant whatever number it carries, sends nothing of it meanwhile, passes it on afterwards; a copy older than the leader's newest vine, or a second grower, is refused
+PLANT-LEASE-NOREVERT  | game   | while a guest rides a vine the leader's copy of that plant never snaps it back; the final plant then the end go to the leader; only the leader revokes
+PLANT-LEASE-ISLAND    | game   | an island a guest's vine connects is attached on the leader and counted in the leader's island counter
+PLANT-LEASE-TIMEOUT   | game   | a vine that never ends frees the plant after the lease time and the normal leader rules apply again
+PLANT-GUEST-QUIET     | game   | a guest sends no plant it did not grow a vine on (no rebuilds of the leader's plant from the trunk creeping on)
+PLANT-COLLIDERS       | game   | after an in-place update, a rebuild and a prune every stem collider near the player is on, layers and kinematic bodies are kept, and nothing points at removed parts
+CS-WIRE               | game   | the story message (cutscenes and story flags) survives a round trip; damaged, padded and oversized ones are refused, also by the gate
+CS-FLAG-LIST          | game   | only story flags are copied, never a cutscene's "already seen" flag or a personal one; the game's cutscene fields exist
+CS-FLAG               | game   | a guest takes a story flag only from the leader, once, sends nothing back; its own story flag goes out once
+CS-RELAY              | game   | the leader takes a guest's story flag into its save and passes it on with the guest as origin; strangers and a guest's skip change nothing
+CS-SR                 | game   | a friend's story flag is never a speedrun split of mine; while not sharing (a race) nothing is sent
+CS-CENSUS             | game   | the level's cutscenes are found by unique done-flags, none copied as a plain flag
+CS-MIRROR             | game   | a cutscene the leader saw starts here through the game's own trigger, nothing sent back
+CS-SKIP-AUTH          | game   | a guest's skip does not skip for others; the leader's skip ends the cutscene here too
+CS-BLOCKS             | game   | after a friend's cutscene is skipped Save & Quit, the pause menu, the input lock, game time and the player are given back
+CS-LOCAL              | game   | a cutscene starting here is told once; the leader's own skip is told once; everything given back after
+CS-ORDER              | game   | a friend's cutscene that cannot start waits; a leader's skip first cancels it; one that never could is marked seen; nothing left blocked
+CS-SCROLL             | game   | the leader's skip of the computer's text skips it here once the text allows it; a guest's does not; the leader's own is told once
+CS-OUTRO              | game   | a lever pull is told once as the ending the game picks; unknown endings refused; an ending seen already does nothing
+CS-NUTRIENT           | game   | the first island's cutscene from a friend waits while it cannot show and never replays when seen
+CREATURE-WIRE         | game   | creature poses, lists, deaths and venus traps survive a round trip; damaged, padded and oversized ones are refused; the gate takes them from the leader only; an older version reads a pose as nothing
+CREATURE-BUDGET       | game   | with 200 creatures near each of 3 guests no guest gets more than its bandwidth cap and no packet is over 24 creatures or 1200 bytes, yet every creature is sent
+CREATURE-INTEREST     | game   | a guest gets creatures near it 10 times a second, those up to 150 m once a second and none further
+CREATURE-CENSUS       | game   | the game fields the creature sync uses (freeze, respawn queue, venus trap end, flying sheep grabs) exist
+CREATURE-LEADER       | game   | as the leader a guest gets the creature list and the poses of creatures near it; nothing beyond 150 m; small packets; nothing to bots
+CREATURE-AWAKE        | game   | as the leader a creature next to a guest is never frozen by my game, even far from my camera
+CREATURE-FLYSHEEP     | game   | a sheep grabbed by a friend's copy does not count for my flying sheep achievement
+CREATURE-CLAIM        | game   | as the leader a creature a guest holds follows that guest with its brain off and gets it back after; strangers and far guests are refused
+CREATURE-PUPPET       | game   | as a guest my creatures take the leader's numbers, their brains stay off and they follow the leader's poses; anybody else's list or pose is refused
+CREATURE-DEATH        | game   | a creature that dies on the leader is told and goes on the guest, its replacement shows when the leader's does; the guest's own game never chunks one
+CREATURE-CLAIM-GUEST  | game   | as a guest a creature I hold is moved by me and its pose goes to the leader marked held
+CREATURE-TRAP         | game   | a venus trap destroyed on the leader is told to everybody and goes on the guest through the game's own trap end
+CREATURE-RELEASE      | game   | in a race or after leaving the party every creature gets its own brain back, switched-off ones return, no mod script stays
+STEAM-APPID           | exe    | the launcher makes sure steam_appid.txt (323320) is in the co-op game folder before every start: created when missing, repaired when wrong
+LAUNCH-ONLY-COOP      | exe    | the launcher only ever starts the co-op GrowHome.exe, never the regular one, and closes a regular game that comes up next to the co-op copy
+HANG-MINIDUMP         | exe    | when the launcher decides the game hung it writes a minidump into the logs folder before closing it, and keeps only the last 2
+MOD-PIN               | exe    | the launcher pins the expected mod fingerprint: a mismatched or older CoopMod.dll is replaced by its own, a newer pinned update is kept
+STEAM-STALE           | exe    | a Steam whose client is up and signed in while its active process stays unset (or dead) is told plainly, offered a Steam restart (-shutdown, then start) and never gets a game start; a Steam still starting (updating, verifying, login screen) is waited for, never offered a restart
+START-GATES           | exe    | the real start runs steam_appid.txt, then the mod pin, then the stale-Steam gate, before it launches anything; an unwritable steam_appid.txt or a stale Steam stops it with nothing started
+LEADER-BEAT           | game   | leader-gone detection uses a heartbeat only the leader advances (pings and echoes never count), live on the wire and in the guest watch
+LEADER-LEFT-SAVE      | game   | a guest kicked by the leader leaving keeps its own save byte for byte
+QUIT-DOOMED           | game   | plant parts destroyed this frame stop counting as Save & Quit blocks at once, never give their block back twice, and the guard keeps no reference to them
+QUIT-GUARD-LOG        | game   | the quit guard logs its counters about once a minute: from the start, regularly, never more often
+HOLLOW-PASS           | game   | every test section ran to its end and reported what it must, the scenario reached its end, and every network sender really advanced
+ONLY-COOP-EXE         | script | only the co-op GrowHome.exe ever runs during the launcher flow and the game stage, never the regular one
+REAL-DATA-UNCHANGED   | script | the owner's real save, save-keep and HKCU\Software\Reflections\Grow Home values are exactly as before the whole run
+RESULT-COMPLETE       | script | the mod's result file is whole (counts, DONE, every section ended, senders advanced, scenario end) and the scorer fails every hollow shape
+THREAD-SAFE           | exe    | no launcher background thread can crash it: a throwing thread is caught, logged and reported as a FAIL; an unhandled exception exits with a code and never shows a Windows dialog
+NO-CRASH-EVENTS       | script | no Application Error, .NET Runtime, Application Hang or Windows Error Reporting event for GrowHomeCoop.exe or GrowHome.exe appears during the run

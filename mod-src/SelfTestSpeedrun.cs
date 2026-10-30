@@ -229,6 +229,7 @@ namespace CoopMod
                 if (k == 1 && ids.Contains("sr_start")) bad.Add("a member can start: " + Ids(rows));
                 if (k == 2 && (!ids.Contains("sr_reset") || !ids.Contains("sr_restart") || !ids.Contains("sr_end"))) bad.Add("solo run lines: " + Ids(rows));
                 if (k == 3 && ids.Contains("sr_restart")) bad.Add("a race can restart alone: " + Ids(rows));
+                if (k == 4 && !ids.Contains("sr_quit")) bad.Add("no SAVE AND QUIT after the run: " + Ids(rows));
                 if (k == 6 && (!ids.Contains("sr_go") || !ids.Contains("sr_cancel") || ids.Contains("sr_start") || ids.Contains("sr_cat"))) bad.Add("armed race leader: " + Ids(rows));
                 if (k == 7 && (!ids.Contains("sr_leave") || ids.Contains("sr_start") || ids.Contains("sr_go"))) bad.Add("armed race member: " + Ids(rows));
                 if (k == 8 && (ids.Contains("sr_start") || ids.Contains("sr_go") || ids.Contains("sr_cancel"))) bad.Add("countdown: " + Ids(rows));

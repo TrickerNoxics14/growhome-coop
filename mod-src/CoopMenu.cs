@@ -91,7 +91,8 @@ namespace CoopMod
             else if (s.SrActive)
             {
                 line1 = (s.SrFinished && s.SrRunState == "FINISHED" ? "RUN FINISHED  " : "RUN ENDED  ") + s.SrTime;
-                line2 = "SAVE AND QUIT TO LEAVE THE SPEEDRUN SAVE";
+                line2 = "SAVE AND QUIT LEAVES THE SPEEDRUN SAVE";
+                rows.Add(new Row("sr_quit", "SAVE AND QUIT"));
                 rows.Add(new Row("sr_hide", s.SrTimerHidden ? "TIMER: HIDE" : "TIMER: SHOW"));
             }
             else
@@ -283,7 +284,7 @@ namespace CoopMod
             {
                 if (StartEntry != null) SpeedrunStartEntry = AddLine(StartEntry.transform, 0, SpeedrunStartName, "SPEEDRUN", OpenSpeedrunFromStart);
                 SpeedrunPauseEntry = AddLine(Entry.transform, 1, SpeedrunPauseName, "SPEEDRUN", OpenSpeedrunFromPause);
-                SpeedrunPauseEntry.gameObject.SetActive(Speedrun.SlotActive);
+                SpeedrunPauseEntry.gameObject.SetActive(SpeedrunLineWanted);
             }
             catch (Exception e) { LastProblem = "speedrun lines: " + SharedWorld.Short(e); CoopBehaviour.Log("ui: no SPEEDRUN line: " + LastProblem); }
         }
@@ -304,12 +305,52 @@ namespace CoopMod
             Singleton<GUIManager>.Instance.ActivateMenu(Menu);
         }
 
-        // the pause menu's SPEEDRUN line is there only while a run uses the slot
+        // the pause menu's SPEEDRUN line is there only while a run is live (after END RUN the game's own Save & Quit takes me out)
+        public static bool SpeedrunPauseForTest;
+        public static bool SpeedrunLineWanted { get { return SpeedrunPauseForTest || (Speedrun.SlotActive && Speedrun.Current != null && Speedrun.Current.Live); } }
         static void PauseEntryTick()
         {
             if (SpeedrunPauseEntry == null) return;
-            bool want = Speedrun.SlotActive;
+            bool want = SpeedrunLineWanted;
             if (SpeedrunPauseEntry.gameObject.activeSelf != want) SpeedrunPauseEntry.gameObject.SetActive(want);
+            FitPauseRows();
+        }
+
+        // The pause panel holds 6 lines of 50; with CO-OP and SPEEDRUN it has 7, so the lines get a little lower instead of running out of the panel.
+        static Transform fitGroup; static int fitCount = -1;
+        static readonly List<LayoutElement> fitRows = new List<LayoutElement>();
+        static readonly List<float> fitMin = new List<float>(), fitPref = new List<float>();
+        public static float PauseRowHeight = 50f;
+        static void FitPauseRows()
+        {
+            var group = SpeedrunPauseEntry == null ? null : SpeedrunPauseEntry.transform.parent;
+            if (group == null) return;
+            if (group != fitGroup)
+            {
+                fitGroup = group; fitCount = -1; fitRows.Clear(); fitMin.Clear(); fitPref.Clear();
+                for (int i = 0; i < group.childCount; i++)
+                {
+                    var le = group.GetChild(i).GetComponent<LayoutElement>();
+                    if (le == null) continue;
+                    fitRows.Add(le); fitMin.Add(le.minHeight); fitPref.Add(le.preferredHeight);
+                }
+            }
+            int count = 0;
+            for (int i = 0; i < group.childCount; i++) if (group.GetChild(i).gameObject.activeSelf) count++;
+            if (count == fitCount) return;
+            fitCount = count;
+            var rt = group as RectTransform;
+            float panel = rt != null ? rt.rect.height : 343f;
+            float full = 0f; foreach (float p in fitPref) full = Mathf.Max(full, p);
+            if (full <= 0f) full = 50f;
+            float h = count > 0 && count * full > panel ? Mathf.Floor(panel / count) : -1f;
+            PauseRowHeight = h > 0f ? h : full;
+            for (int i = 0; i < fitRows.Count; i++)
+            {
+                if (fitRows[i] == null) continue;
+                fitRows[i].minHeight = h > 0f ? Mathf.Min(fitMin[i], h) : fitMin[i];
+                fitRows[i].preferredHeight = h > 0f ? h : fitPref[i];
+            }
         }
 
         // a copy of one of the menu's own lines, placed next to it (offset 0 = above, 1 = below), with its own label and action

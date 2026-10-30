@@ -18,7 +18,7 @@ static partial class Program
 {
     const string ExpectedAssemblySha = "8d99d51663061da95016e496116191850b6a5437250cfc38bb8576027b2aa40d";   // Grow Home Steam build 857617
     static string ManifestUrl = "https://raw.githubusercontent.com/TrickerNoxics14/growhome-coop/main/version.json";
-    const int BundledVersion = 14;                                  // version of the CoopMod.dll embedded in this exe
+    const int BundledVersion = 15;                                  // version of the CoopMod.dll embedded in this exe
 
     static string installDir, gameDir;
     static bool noPrompt, auditMode;
@@ -30,8 +30,56 @@ static partial class Program
 
     [System.Runtime.InteropServices.DllImport("kernel32.dll")] static extern bool AttachConsole(int pid);
 
+    // no crash may ever pop a Windows dialog on the player's screen: critical-error and fault boxes are off for this process (and the processes it starts)
+    const uint SEM_FAILCRITICALERRORS = 0x0001, SEM_NOGPFAULTERRORBOX = 0x0002, SEM_NOOPENFILEERRORBOX = 0x8000;
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")] static extern uint SetErrorMode(uint mode);
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")] static extern uint GetErrorMode();
+    static bool crashHandlerOn;
+
+    static void QuietCrashes()
+    {
+        try { SetErrorMode(GetErrorMode() | SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX); } catch { }
+        AppDomain.CurrentDomain.UnhandledException += (s, e) =>
+        {
+            // last line of defence: log it, record it (audit), and leave with an exit code instead of the Windows "has stopped working" dialog
+            string what = e.ExceptionObject is Exception ? e.ExceptionObject.ToString() : Convert.ToString(e.ExceptionObject);
+            try { Log("unhandled: " + what); } catch { }
+            if (auditMode)
+            {
+                try { Check("THREAD-SAFE", false, "the launcher audit ran without an unhandled exception", (what ?? "").Split((char)10)[0].Trim()); WriteAuditOut(); } catch { }
+                Environment.Exit(4);
+            }
+            Environment.Exit(1);
+        };
+        // the window's own thread: WinForms would catch an exception there (paint, timer, a posted action) and show its "Unhandled exception has
+        // occurred in your application" dialog, which neither the handler above nor the error mode stops. Set before any window exists.
+        try
+        {
+            System.Windows.Forms.Application.SetUnhandledExceptionMode(System.Windows.Forms.UnhandledExceptionMode.CatchException, false);
+            System.Windows.Forms.Application.ThreadException += OnUiException;
+            uiHandlerOn = true;
+        }
+        catch (Exception e) { try { Log("could not set the window's crash handler: " + e.Message); } catch { } }
+        crashHandlerOn = true;
+    }
+
+    static bool uiHandlerOn; static int uiFaults; static volatile bool uiFaultTest;
+    static void OnUiException(object sender, System.Threading.ThreadExceptionEventArgs e)
+    {
+        lock (auditLines) uiFaults++;
+        try { Log("unhandled on the window's thread: " + e.Exception); } catch { }
+        if (uiFaultTest) return;                 // the audit raised it on purpose: counted, nothing else
+        if (auditMode)
+        {
+            try { Check("THREAD-SAFE", false, "the launcher audit ran without an unhandled exception on the window's thread", (Convert.ToString(e.Exception) ?? "").Split((char)10)[0].Trim()); WriteAuditOut(); } catch { }
+            Environment.Exit(4);
+        }
+        Environment.Exit(1);
+    }
+
     static int Main(string[] args)
     {
+        QuietCrashes();
         AppDomain.CurrentDomain.AssemblyResolve += ResolveEmbedded;
         try { ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072; } catch { }
 
@@ -63,10 +111,19 @@ static partial class Program
         }
         gameDir = Path.Combine(installDir, "game");
         if (useGame != null) { gameDir = useGame; installDir = Path.GetDirectoryName(Path.GetFullPath(useGame)); }
+        // --use-game pointed at the regular Steam game: refused before anything (install, mod, steam_appid.txt, launcher.log) is written there
+        if (useGame != null && !auditMode && IsRegularGameFolder(Path.GetFullPath(useGame))) { AttachConsole(-1); Console.WriteLine("--use-game " + useGame + " is the regular Grow Home's own folder. Nothing was changed or started."); return 2; }
 
         bool window = !consoleMode && !assumeYes && !noPrompt && !auditMode && !setupSteam && !undoSteam;
         if (!window) { AttachConsole(-1); try { Console.Title = "Grow Home Co-op"; } catch { } }     // text modes print into the console they were started from
         if (auditMode) return Audit();
+        launcherLock = TakeLock(LauncherMutexName);
+        if (launcherLock == null)
+        {
+            PointToOtherLauncher();
+            if (!window) Console.WriteLine("Grow Home Co-op is already open.");
+            return 5;
+        }
         if (window) return GuiMain();
 
         int code = RunFlow();
@@ -80,8 +137,7 @@ static partial class Program
     {
         try
         {
-            bool installed = File.Exists(Path.Combine(gameDir, "GrowHome.exe")) && File.Exists(Path.Combine(gameDir, "GrowHome_Data", "Managed", "CoopMod.dll"));
-            if (!installed || cliReinstall)
+            if (NeedsInstall())
             {
                 Install(cliGameOverride, cliSkin);
                 if (noPrompt) return 0;
@@ -100,6 +156,18 @@ static partial class Program
             return 1;
         }
     }
+
+    // The co-op copy is there: its exe and the patched assembly (the patcher keeps the original next to it as .orig). A missing CoopMod.dll alone
+    // is NOT "not installed": the start puts the bundled one back (EnforceModPin), where a reinstall would delete the copy and the co-op save in it.
+    static bool CopyInstalled(string dir)
+    {
+        string managed = Path.Combine(dir, "GrowHome_Data", "Managed");
+        if (!File.Exists(Path.Combine(dir, "GrowHome.exe")) || !File.Exists(Path.Combine(managed, "Assembly-CSharp.dll"))) return false;
+        if (File.Exists(Path.Combine(managed, "CoopMod.dll"))) return true;
+        return File.Exists(Path.Combine(managed, "Assembly-CSharp.dll.orig")) && BundledMod() != null;
+    }
+
+    static bool NeedsInstall() { return !CopyInstalled(gameDir) || cliReinstall; }
 
     // ---- embedded files -----------------------------------------------------------------------------------------------------------------
 
@@ -173,6 +241,8 @@ static partial class Program
 
     static void Install(string gameOverride, string skin)
     {
+        if (IsRegularGameFolder(gameDir) || (gameOverride != null && SamePath(gameOverride, gameDir))) throw new Exception("The co-op folder " + gameDir + " is the regular Grow Home's own folder. Nothing was changed.");
+        if (Directory.Exists(gameDir) && OurGameRunning()) throw new Exception("The co-op game is running. Close it first, then install again.");
         Say("Installing Grow Home Co-op");
         string src = gameOverride ?? FindGame();
         if (src == null) throw new Exception("Could not find Grow Home. Install it on Steam first, then run this again.");
@@ -274,16 +344,62 @@ static partial class Program
         foreach (var d in Directory.GetDirectories(from)) CopyTree(d, Path.Combine(to, Path.GetFileName(d)), root, total, ref done, ref shown);
     }
 
-    // Deleting the co-op copy must never touch the original: linked files only lose this extra name. Read-only flags are cleared on the co-op copy only
-    // for real copies (a linked file shares its flags with the original, and the original is left exactly as it is).
+    // Deleting the co-op copy must never touch the original: linked files only lose this extra name. A read-only file is deleted through one handle
+    // that puts its flags back before it closes (a linked file shares its flags with the original, and the original is left exactly as it is).
     static void DeleteGameCopy(string dir)
     {
+        // renamed first: a file the game (or anything else) still holds stops it here, before a single file is gone
+        string doomed = dir.TrimEnd(Path.DirectorySeparatorChar, '/') + ".old-" + DateTime.Now.Ticks;
+        try { Directory.Move(dir, doomed); }
+        catch (IOException e) { throw new Exception("The co-op copy is in use (is the game still running?). Nothing was deleted. " + e.Message); }
+        catch (UnauthorizedAccessException e) { throw new Exception("The co-op copy is in use (is the game still running?). Nothing was deleted. " + e.Message); }
+        dir = doomed;
         foreach (var f in Directory.GetFiles(dir, "*", SearchOption.AllDirectories))
         {
             try { File.Delete(f); }
-            catch (UnauthorizedAccessException) { var a = File.GetAttributes(f); File.SetAttributes(f, a & ~FileAttributes.ReadOnly); File.Delete(f); }
+            catch (UnauthorizedAccessException) { DeleteReadOnly(f); }
         }
         Directory.Delete(dir, true);
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    struct FileBasicInfo { public long Creation, LastAccess, LastWrite, Change; public uint Attributes; }
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool GetFileInformationByHandleEx(Microsoft.Win32.SafeHandles.SafeFileHandle h, int infoClass, out FileBasicInfo info, int size);
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool SetFileInformationByHandle(Microsoft.Win32.SafeHandles.SafeFileHandle h, int infoClass, ref FileBasicInfo info, int size);
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool SetFileInformationByHandle(Microsoft.Win32.SafeHandles.SafeFileHandle h, int infoClass, ref byte deleteFile, int size);
+
+    // A read-only file in the co-op copy. Its flags live on the file itself, which a linked file shares with the original. Through one handle:
+    // read-only off, marked for deletion, flags put back exactly, then closed - this name goes, and the original keeps exactly the flags it had.
+    static void DeleteReadOnly(string f)
+    {
+        string why = null;
+        using (var h = CreateFileW(f, 0x00010000 | 0x0100 | 0x0080, 7, IntPtr.Zero, 3, 0, IntPtr.Zero))     // DELETE | FILE_WRITE_ATTRIBUTES | FILE_READ_ATTRIBUTES, share all, OPEN_EXISTING
+        {
+            int size = System.Runtime.InteropServices.Marshal.SizeOf(typeof(FileBasicInfo));
+            FileBasicInfo had;
+            if (h.IsInvalid) why = "open";
+            else if (!GetFileInformationByHandleEx(h, 0, out had, size)) why = "read flags";
+            else
+            {
+                var off = new FileBasicInfo { Attributes = (had.Attributes & ~(uint)FileAttributes.ReadOnly) == 0 ? (uint)FileAttributes.Normal : had.Attributes & ~(uint)FileAttributes.ReadOnly };   // 0 times: left as they are
+                var back = new FileBasicInfo { Attributes = had.Attributes };
+                byte del = 1;
+                if (!SetFileInformationByHandle(h, 0, ref off, size)) why = "clear read-only";
+                else
+                {
+                    bool marked = SetFileInformationByHandle(h, 4, ref del, 1);                       // FileDispositionInfo: gone when the handle closes
+                    if (!SetFileInformationByHandle(h, 0, ref back, size)) Log("could not put the flags back on " + f + " (error " + System.Runtime.InteropServices.Marshal.GetLastWin32Error() + ")");
+                    if (!marked) why = "mark for deletion";
+                }
+            }
+            if (why != null) why += " failed (error " + System.Runtime.InteropServices.Marshal.GetLastWin32Error() + ")";
+        }
+        if (why != null) throw new IOException("Could not delete the read-only file " + f + ": " + why + ". Nothing of the original was changed.");
     }
 
     // Inserts a call to CoopMod.Bootstrap.Init() at the start of SteamManager.Awake (the original dll is kept as .orig).
@@ -376,12 +492,6 @@ static partial class Program
     static string StagedInfo { get { return Path.Combine(gameDir, "coop-staged.txt"); } }
     static string TargetDll { get { return Path.Combine(gameDir, "GrowHome_Data", "Managed", "CoopMod.dll"); } }
 
-    static void Swap(byte[] data, int version)
-    {
-        File.Copy(TargetDll, TargetDll + ".bak", true);
-        File.WriteAllBytes(TargetDll, data);
-        File.WriteAllText(Path.Combine(gameDir, "coop-version.txt"), version.ToString());
-    }
 
     // A mod update downloaded during an earlier start is put in place now, before the game runs (no network needed, so this is instant).
     static void ApplyStaged()
@@ -392,9 +502,12 @@ static partial class Program
             var parts = File.ReadAllText(StagedInfo).Split(new[] { '\n', '\r', ' ' }, StringSplitOptions.RemoveEmptyEntries);
             int version = int.Parse(parts[0]); string sha = parts[1];
             byte[] data = File.ReadAllBytes(StagedDll);
-            if (version > InstalledVersion() && string.Equals(Sha256(data), sha, StringComparison.OrdinalIgnoreCase) && Process.GetProcessesByName("GrowHome").Length == 0)
+            bool good = version > InstalledVersion() && string.Equals(Sha256(data), sha, StringComparison.OrdinalIgnoreCase);
+            // a game that runs keeps the mod it loaded: the update waits for the next start instead of being thrown away
+            if (good && Process.GetProcessesByName("GrowHome").Length > 0) { Log("a game runs; staged update " + version + " is kept for the next start"); return; }
+            if (good)
             {
-                Swap(data, version);
+                if (!Swap(data, version)) { Log("staged update " + version + " kept for the next start"); return; }
                 Say("Co-op mod updated to version " + version + ".");
                 Log("applied staged update " + version);
             }
@@ -426,7 +539,7 @@ static partial class Program
             Say("New co-op mod version " + latest + (notes != null ? " (" + notes + ")" : "") + ": downloading...");
             byte[] data = GetBytes(url, downloadMs);
             if (!string.Equals(Sha256(data), sha, StringComparison.OrdinalIgnoreCase)) { Say("Downloaded file did not match its fingerprint; skipped for safety."); Log("update fingerprint mismatch"); return 0; }
-            if (applyNow && Process.GetProcessesByName("GrowHome").Length == 0) { Swap(data, latest); LastCheck = "installed"; Say("Updated."); Log("updated to " + latest); return latest; }
+            if (applyNow && Process.GetProcessesByName("GrowHome").Length == 0 && Swap(data, latest)) { LastCheck = "installed"; Say("Updated."); Log("updated to " + latest); return latest; }
             File.WriteAllBytes(StagedDll, data);
             File.WriteAllText(StagedInfo, latest + "\n" + sha);
             LastCheck = "staged"; Say("Update downloaded. It will be used the next time you start the game.");
