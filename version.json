@@ -1,7 +1,7 @@
 ﻿{
-    "version":  15,
+    "version":  16,
     "dll":  "https://raw.githubusercontent.com/TrickerNoxics14/growhome-coop/main/CoopMod.dll",
-    "sha256":  "2469a10a9aa27eba735d7ebe826db6f2ca9d89707902e52ba6f3e378c60a6f8a",
-    "notes":  "v15: fixes launcher black screen and crash dialogs, Save \u0026 Quit always shown, leader leaving sends everyone to the menu, smoother movement, guests can grow vines, plant collision, synced cutscenes and creatures, Steam restart helper and other safety checks.",
-    "signature":  "ZVZZfCxzlOohy/xwP/4nm8QqC0lBOa1Ign8juyGm3gb7xJvqEWVzl3+drTyoqQ4LFDRNze2Jm7mRx5XkMxjDw7DyGlotyCW/jHr3S+qiGsHPgmv+kVMQn8iplTQTSM1RD/R9Tsiafej8f+BBA3RcM57HKGKdeN7Y1RyYq3qcdFfVf8w41Kf8za4veSTi/6SQkWksBpcCAvDvgN8DB1lUINBiQv7mQkeItTKxfD+w/2/qwvJO6jUMg3zk+3kZENC0Rfqu+pUk8cw2v76BPGlEhuQxOuP2k5nSegQBFgeCPl6+er19EgESnE0f1DNXY4KCx3FxeR0hvKjcP7lkzGtsFXWhuC7zGdCKBrXfuM8POgfWcDcm0pQDn038jDzkEpQgmDn29cQxgNREOwOz69jJ5DGFBo+TfFSXu+176g/VRRIHAA6psvaZDWcnCPYc/S4pt5Dbn436TIXRJAt45WImNvDUYOagyRNiUdBJ6cZefkqENqtraOlLQ+yLWaZgc0wX"
+    "sha256":  "9ff5972e4bcadf8385be8c6e2b37c89c163538e26dfdd6d19843320a3e25763b",
+    "notes":  "v16: every co-op screen is now part of the game itself - Make a Room and Join a Room are real game menus (type the invite code right in the menu), and the status line, chat, join requests, name tags and speedrun timer sit on the game\u0027s own HUD in its font. Nothing is drawn on top of the game anymore.",
+    "signature":  "lnrqV7GNqm+2iBRt000k+29hlUkkyg3j1aakTQwS81irnuPlDIaedM255vnfICI8sQbon0LfLWzU3CKHbGYTgtdP12IvPjsm5o91PdxRipDYSfnbR/0nI4RhInN/BcxDdx/tksPe5UR5fbwpZK7ibMRbreATslAz74NVnb6y1Sqr3AVdLuN94R0QSMehjY2RHAIf6DiANTSi2VnMiOhf08FO3GPT4mxwozpx58IID8XU+ca/0iBePcsBenqyqGyItqVAaFQB2qnw/lo0rZaW3QhPeJgtW42rVbc0SwTPLSN2ZeeaLHX4yMkTEz5Gs1r3AxXQl5ze5SVAFafhTZ6PYOjbp95+eZYNaBW96/HsIEgZk6yWQi5t9bSqBTfWqmP0HaE5IyscTbNv6W9DrgYJfCIHlZJV6RHqvN0R3Dq487L/zIf1HkPPpXtOd2NvjjRgE6jqhTKrul4iTOzzkdk8NwFRgDog5HYHcQlpifEQ/fvpibvOmXbK3oLhuYMl8ZOO"
 }

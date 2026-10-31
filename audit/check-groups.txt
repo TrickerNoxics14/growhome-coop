@@ -8,6 +8,8 @@
 # The groups must match the On("...") tags of the sections in coopmod\SelfTest.cs. A check a skipped group would have run is SKIPPED;
 # one that reported anyway (its section is shared with a chosen group) is judged as usual.
 # Groups: world, plants, party, net, clone, fx, ui, speedrun, session, movement, story, creatures, launcher
+# The groups whose live sections report a network SENDER: a quick run of any of them must report one (RESULT-COMPLETE), a full run always must.
+# senders: movement,party,session
 LZ-ROUNDTRIP          | net,plants
 LZ-HOSTILE            | net
 GATE-ROUTING          | net
@@ -57,6 +59,28 @@ UPDATE-NOTICE         | ui
 UI-DUMP               | ui
 HUD-MSG               | ui
 COOP-MENU             | ui
+HOTKEYS               | ui
+MAKE-ROOM-MENU        | ui
+JOIN-ROOM-MENU        | ui
+TEXT-ROW              | ui
+JOIN-REQUEST-HUD      | ui
+CODE-NOTICE           | ui
+NO-IMGUI              | ui
+HUD-CANVAS            | ui
+LINK-LINE             | ui
+MOM-MIRROR            | ui
+CHAT-HUD              | ui
+NAME-TAGS             | ui
+F1-HIDE               | ui
+NATIVE-FONT           | ui
+MENU-NAV              | ui
+PAUSE-OVER-COOP       | ui
+HUD-LAYOUT            | ui
+MENU-NOTICE           | ui
+MESSAGES-KEPT         | ui
+PAGE-ESC              | ui
+TYPING-GUARDS         | ui
+LINK-FIT              | ui
 PARTY                 | party
 PARTY-MENU            | party
 WORLD-PARTS           | party

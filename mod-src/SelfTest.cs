@@ -103,13 +103,14 @@ namespace CoopMod
         {
             // intro screens are skipped by the mod itself (Bootstrap); the audit checks that
             StartCoroutine(Run());
+            StartCoroutine(ImguiWatch());          // NO-IMGUI: whose OnGUI runs, every frame of the whole audit (SelfTestNativeC.cs)
         }
 
         void Update()
         {
             AudioListener.volume = 0f;           // nobody is listening
             if (SharedWorld.TestSink != null) SharedWorld.Tick(sink);   // with nobody else connected the mod does not run its sync loop; the audit runs it so the same code is exercised
-            if (Singleton<PauseManager>.Exists && PauseManager.Paused) PauseManager.ResumeRequested = true;   // an unfocused window must not stop the test
+            if (!holdPause && Singleton<PauseManager>.Exists && PauseManager.Paused) PauseManager.ResumeRequested = true;   // an unfocused window must not stop the test (the pause checks hold it)
         }
 
         // ---- reporting ---------------------------------------------------------------------------------------------------------------
@@ -736,18 +737,20 @@ namespace CoopMod
             bool oldLock = Screen.lockCursor, oldShow = Screen.showCursor;
             try
             {
+                // JOIN A ROOM is a page of the co-op menu now: the game's own event system must stay ON (the native menu runs on it)
+                bool wasMenu = Singleton<GUIManager>.Exists && Singleton<GUIManager>.Instance.AnyMenuActive;
                 cb.OpenJoinForTest();
+                bool opened = cb.JoinOpenForTest && CoopMenu.Showing;
                 Screen.lockCursor = true; Screen.showCursor = false;
                 cb.ApplyCursorForTest();
-                bool freed = cb.WantMouseForTest && !Screen.lockCursor && Screen.showCursor;
-                var esType = Type.GetType("UnityEngine.EventSystems.EventSystem, UnityEngine.UI");
-                var es = esType == null ? null : UnityEngine.Object.FindObjectOfType(esType) as Behaviour;
-                bool menusFrozen = es == null || (cb.MenusFrozenForTest && !es.enabled);
+                bool freed = cb.WantMouseForTest && !Screen.lockCursor && Screen.showCursor && (!Singleton<InputMethodTracker>.Exists || cb.TrackerFreedForTest);
+                var es = UnityEngine.EventSystems.EventSystem.current;
+                bool live = es != null && es.enabled && es.gameObject.activeInHierarchy;
                 cb.CloseJoinForTest();
                 cb.ApplyCursorForTest();
-                bool released = !cb.WantMouseForTest && !cb.MenusFrozenForTest && (es == null || es.enabled);
-                Check("MOUSE-FREE", "while my window is open the game's own menus (Continue, New Game...) get no clicks or keys, and work again when it closes" + (es == null ? " (no menu event system in this scene)" : ""), menusFrozen && released, "frozen=" + menusFrozen + " released=" + released);
-                Check("MOUSE-FREE", "while the code box is open the mouse is shown and unlocked (so JOIN and CANCEL can be clicked), and the game gets it back when it closes", freed && !cb.WantMouseForTest, "freed=" + freed);
+                bool released = !cb.WantMouseForTest && !cb.JoinOpenForTest && !CoopMenu.Showing && !cb.TrackerFreedForTest && es != null && es.enabled;
+                Check("MOUSE-FREE", "the JOIN A ROOM page opened by its key in the world is the game's own menu, on the game's event system (never switched off), and closing it gives every key back", !wasMenu && opened && live && released, "noMenuBefore=" + !wasMenu + " opened=" + opened + " eventSystemOn=" + live + " released=" + released);
+                Check("MOUSE-FREE", "while the page is open in the world the mouse is shown and unlocked (the game's cursor tracker paused), and the game gets it back when it closes", opened && freed && released, "freed=" + freed + " released=" + released);
             }
             finally { Screen.lockCursor = oldLock; Screen.showCursor = oldShow; cb.CloseJoinForTest(); }
         }
@@ -871,6 +874,9 @@ namespace CoopMod
 
         // ---- the scenario ------------------------------------------------------------------------------------------------------------
 
+        // every group with a section in the world (the quick-run gate below): party has leader-beat/left-live, speedrun the in-world HUD layout and IMGUI watch
+        public const string InWorldGroups = "world,plants,net,ui,clone,fx,session,movement,story,creatures,party,speedrun";
+
         IEnumerator Run()
         {
             Log("started");
@@ -899,7 +905,7 @@ namespace CoopMod
             if (On("creatures,net")) Try("CREATURE-WIRE", "creature message checks ran", CheckCreaturePure);
 
             float begin = Time.realtimeSinceStartup;
-            bool pressed = false, partyTested = !On("party"), srTested = !On("speedrun"); float menuAt = -1f;
+            bool pressed = false, partyTested = !On("party"), srTested = !On("speedrun"), noticeTested = !On("ui"); float menuAt = -1f;
             while (!WorldSync.InWorld())
             {
                 if (!pressed && StartMenuReady())
@@ -916,6 +922,12 @@ namespace CoopMod
                         yield return StartCoroutine(Section("party-menu", null, TestPartyMenu()));
                         if (CoopMenu.Menu != null && CoopMenu.Menu.gameObject.activeInHierarchy) CoopMenu.Menu.Close();
                     }
+                    else if (Time.realtimeSinceStartup - menuAt > 2f && !noticeTested)
+                    {
+                        // what co-op says on the start menu itself (SelfTestNativeGuards.cs)
+                        noticeTested = true;
+                        yield return StartCoroutine(Section("start-notice", StartNoticeIds, TestStartNotice()));
+                    }
                     else if (Time.realtimeSinceStartup - menuAt > 2f && !srTested)
                     {
                         // speedruns start from the start screen: two runs in the speedrun save slot before the audit's own game
@@ -923,7 +935,7 @@ namespace CoopMod
                         yield return StartCoroutine(Section("speedrun-live", null, TestSpeedrunLive()));
                         if (CoopMenu.Menu != null && CoopMenu.Menu.gameObject.activeInHierarchy) CoopMenu.Menu.Close();
                     }
-                    else if (Time.realtimeSinceStartup - menuAt > 2f)
+                    else if (Time.realtimeSinceStartup - menuAt > 2f && (StartWatched() || Time.realtimeSinceStartup - menuAt > 20f))
                     {
                         pressed = true;
                         bool fresh = !SaveSystem.LevelSaveExists(Application.loadedLevelName);
@@ -935,7 +947,7 @@ namespace CoopMod
                 yield return null;
             }
             Log("in the world after " + (Time.realtimeSinceStartup - begin).ToString("F0") + " s; letting things settle");
-            if (!On("world,plants,net,ui,clone,fx,session,movement,story,creatures")) { Note("quick audit: no in-world group chosen; stopping in the world"); scenarioComplete = true; Note("scenario complete: every chosen section ran"); Finish(); yield break; }
+            if (!On(InWorldGroups)) { Note("quick audit: no in-world group chosen; stopping in the world"); scenarioComplete = true; Note("scenario complete: every chosen section ran"); Finish(); yield break; }
             yield return new WaitForSeconds(20f);     // fixed on purpose: nothing observable says the world has settled
 
             if (SharedWorld.MyId == 0UL) SharedWorld.MyId = 1UL;
@@ -951,6 +963,11 @@ namespace CoopMod
                 yield return StartCoroutine(Section("hud-messages", "HUD-MSG", TestHudMessages()));
                 CoopUI.ShownForTest = false; CoopUI.Hidden = displayWasHidden;
                 yield return StartCoroutine(Section("coop-menu", "COOP-MENU", TestCoopMenu()));
+                yield return StartCoroutine(Section("native-menus", NativeMenuIds, TestNativeMenus()));          // MAKE A ROOM, JOIN A ROOM, the code line, F2/F3, the join request, the invite code (SelfTestNativeUi.cs)
+                yield return StartCoroutine(Section("native-hud", NativeHudIds, TestNativeHud()));              // no IMGUI, the HUD canvas, link line, M.O.M messages, SAY> and chat log, name tags, F1 (SelfTestHud.cs)
+                yield return StartCoroutine(Section("native-final", NativeCIds, TestNativeC()));                // IMGUI watch, fonts, menu walking, pause over a page, HUD layout at two sizes (SelfTestNativeC.cs)
+                yield return StartCoroutine(Section("native-guards", NativeGuardIds, TestNativeGuards()));      // messages under menus, Esc on a page, typing guards (SelfTestNativeGuards.cs)
+                Try("LINK-FIT", "link line fit checks ran", CheckLinkFit);
             }
             if (On("ui,session")) yield return StartCoroutine(Section("pause-rows", "PAUSE-ROWS,QUIT-GUARD,QUIT-DOOMED", TestPauseRows()));
 
@@ -1453,7 +1470,7 @@ namespace CoopMod
             bool cancelOk = pause.gameObject.activeInHierarchy && !menu.gameObject.activeInHierarchy;
             Check("COOP-MENU", "BACK and the cancel key (Esc / B) go back to the pause menu, and the co-op menu opens again after that", backOk && reopened && cancelOk, "back=" + backOk + " reopened=" + reopened + " cancel=" + cancelOk);
 
-            // JOIN A PARTY leaves the menus and opens the join window (typing needs it)
+            // JOIN A PARTY opens the JOIN A ROOM page inside this menu; BACK comes back to the co-op page, then to the pause menu
             if (cb.CoopMenuState().Online && !cb.CoopMenuState().InLobby)
             {
                 CoopMenu.Entry.onClick.Invoke(); yield return null;
@@ -1462,10 +1479,17 @@ namespace CoopMod
                 if (jb != null) jb.onClick.Invoke();
                 float t0 = Time.realtimeSinceStartup;
                 while (!cb.JoinOpenForTest && Time.realtimeSinceStartup - t0 < 2f) yield return null;
-                bool joined = cb.JoinOpenForTest && !gm.AnyMenuActive;
-                cb.CloseJoinForTest();
                 yield return null;
-                Check("COOP-MENU", "JOIN A PARTY closes the menus and opens the join window (code and party list), and the game gets the keys back when it closes", jb != null && joined && !cb.JoinOpenForTest && !gm.AnyMenuActive, "line=" + (jb != null) + " opened=" + joined);
+                var ids = handler.RowIdsForTest;
+                bool page = cb.JoinOpenForTest && menu.gameObject.activeInHierarchy && ids.Count >= 4 && ids[0] == "join_code" && ids[1] == "join_go" && ids[ids.Count - 1] == "back"
+                    && handler.Line1 != null && handler.Line1.text == "JOIN A ROOM" && cb.PageEntryForTest == CoopBehaviour.EntryMenu;
+                yield return StartCoroutine(WaitReal(CoopMenuHandler.SettleTime + 0.1f));
+                var back2 = handler.ButtonFor("back");
+                if (back2 != null) back2.onClick.Invoke();
+                yield return null;
+                bool mainAgain = menu.gameObject.activeInHierarchy && !cb.JoinOpenForTest && handler.ButtonFor("join") != null && !CoopField.AnyFocused;
+                Check("COOP-MENU", "JOIN A PARTY opens the JOIN A ROOM page inside the co-op menu (code line, JOIN WITH CODE, BACK), and its BACK returns to the co-op page with the typing stopped",
+                    jb != null && page && mainAgain, "line=" + (jb != null) + " page=" + page + " rows " + string.Join(",", ids.ToArray()) + " back=" + mainAgain);
             }
             else Check("COOP-MENU", "JOIN A PARTY is offered when Steam is running and I am not in a party", !cb.CoopMenuState().Online || cb.CoopMenuState().InLobby, "");
             if (gm.AnyMenuActive) gm.CloseAllMenus();
@@ -1820,7 +1844,7 @@ namespace CoopMod
             bool closed = !menu.gameObject.activeInHierarchy && start.gameObject.activeInHierarchy && CoopMenu.StartMenuShowing();
             Check("PARTY-MENU", "cancel (Esc / B) on the friends page goes back to the party page, and from the party page back to the start menu", pageBack && closed, "page=" + pageBack + " closed=" + closed);
 
-            // JOIN A PARTY on the start screen: the join window over the start menu (its clicks paused), and back to the party menu when it closes
+            // JOIN A PARTY on the start screen: the JOIN A ROOM page inside the party menu (no window over the start menu), BACK returns to the party page
             if (cb.CoopMenuState().Online && !cb.CoopMenuState().InLobby)
             {
                 entry.onClick.Invoke(); yield return null; yield return null;
@@ -1830,16 +1854,19 @@ namespace CoopMod
                 float t0 = Time.realtimeSinceStartup;
                 while (!cb.JoinOpenForTest && Time.realtimeSinceStartup - t0 < 2f) yield return null;
                 yield return null;
-                bool opened = cb.JoinOpenForTest && !menu.gameObject.activeInHierarchy && start.gameObject.activeInHierarchy && cb.MenusFrozenForTest;
-                cb.CloseJoinForTest();
-                t0 = Time.realtimeSinceStartup;
-                while (!menu.gameObject.activeInHierarchy && Time.realtimeSinceStartup - t0 < 3f) yield return null;
-                yield return null;
-                bool returned = menu.gameObject.activeInHierarchy && !cb.JoinOpenForTest && !cb.MenusFrozenForTest && UnityEngine.EventSystems.EventSystem.current != null;
+                var ids = handler.RowIdsForTest;
+                var es0 = UnityEngine.EventSystems.EventSystem.current;
+                bool opened = cb.JoinOpenForTest && menu.gameObject.activeInHierarchy && !start.gameObject.activeInHierarchy && ids.Count > 0 && ids[0] == "join_code"
+                    && es0 != null && es0.enabled && handler.Title != null && handler.Title.text == "PARTY";
+                yield return StartCoroutine(WaitReal(CoopMenuHandler.SettleTime + 0.1f));
+                var back2 = handler.ButtonFor("back");
+                if (back2 != null) back2.onClick.Invoke();
+                yield return null; yield return null;
+                bool returned = menu.gameObject.activeInHierarchy && !cb.JoinOpenForTest && handler.ButtonFor("join") != null && !CoopField.AnyFocused && UnityEngine.EventSystems.EventSystem.current != null;
                 handler.OnMenuCancel(); yield return null; yield return null;
                 bool startAgain = CoopMenu.StartMenuShowing();
-                Check("PARTY-MENU", "JOIN A PARTY on the start screen opens the join window over the start menu (the menu's clicks paused behind it), and the party menu comes back when it closes",
-                    jb != null && opened && returned && startAgain, "line=" + (jb != null) + " opened=" + opened + " returned=" + returned + " startMenu=" + startAgain);
+                Check("PARTY-MENU", "JOIN A PARTY on the start screen opens the JOIN A ROOM page inside the party menu (the game's event system stays on), BACK returns to the party page and cancel to the start menu",
+                    jb != null && opened && returned && startAgain, "line=" + (jb != null) + " opened=" + opened + " rows " + string.Join(",", ids.ToArray()) + " returned=" + returned + " startMenu=" + startAgain);
             }
             else Check("PARTY-MENU", "JOIN A PARTY is offered on the start screen when Steam is running and I am not in a party", !cb.CoopMenuState().Online || cb.CoopMenuState().InLobby, "");
             if (menu.gameObject.activeInHierarchy) handler.OnMenuCancel();

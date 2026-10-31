@@ -247,7 +247,7 @@ namespace CoopMod
             Kicks++; LastKickWhy = why; kickDue = true;
             Log("party: " + why + ": " + LeaderWatch.Message + ". Back to the start menu (my own save is not touched, nothing is sent to the leader)");
             CoopUI.Toast(LeaderWatch.Message);
-            CloseChat(); if (joinOpen) CloseJoinBox(); CloseHostMenu();
+            CloseChat(); if (joinOpen || hostMenuOpen) CloseCoopPage();
             if (Singleton<PauseManager>.Exists) PauseManager.ResetLevel();
         }
 

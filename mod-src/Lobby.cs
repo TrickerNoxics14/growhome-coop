@@ -128,7 +128,7 @@ namespace CoopMod
         void OnCreated(LobbyCreated_t r, bool ioFailure)
         {
             busyUntil = 0f;
-            if (ioFailure || r.m_eResult != EResult.k_EResultOK) { Status = "could not make the party (" + r.m_eResult + ")"; CoopBehaviour.Log("lobby: create failed " + r.m_eResult + " io=" + ioFailure); return; }
+            if (ioFailure || r.m_eResult != EResult.k_EResultOK) { Status = "could not make the party (" + r.m_eResult + ")"; CoopUI.Toast("COULD NOT MAKE THE ROOM. TRY AGAIN"); CoopBehaviour.Log("lobby: create failed " + r.m_eResult + " io=" + ioFailure); return; }
             Id = new CSteamID(r.m_ulSteamIDLobby);
             InLobby = true; IsOpen = wantOpen; HostId = SteamUser.GetSteamID().m_SteamID;
             SteamMatchmaking.SetLobbyData(Id, "gh", "1");
@@ -141,12 +141,21 @@ namespace CoopMod
             SyncMembers();
         }
 
+        // Steam said no to a join (a code for no room, a full room, a host gone). The page that asked has closed by then, so M.O.M says it
+        // (on the start or pause menu's notice line, the co-op menu's subtitle or the HUD), as the old status panel did.
+        public const string JoinNoText = "could not join (code wrong, party full or the host left)";
+        public void JoinDidNotWork()
+        {
+            Status = JoinNoText;
+            CoopUI.Toast("COULD NOT JOIN: CODE WRONG, PARTY FULL OR THE HOST LEFT");
+        }
+
         void OnEntered(LobbyEnter_t r, bool ioFailure)
         {
             busyUntil = 0f;
             if (ioFailure || r.m_EChatRoomEnterResponse != 1)
             {
-                Status = "could not join (code wrong, party full or the host left)";
+                JoinDidNotWork();
                 CoopBehaviour.Log("lobby: join failed, response " + r.m_EChatRoomEnterResponse + " io=" + ioFailure);
                 return;
             }

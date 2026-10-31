@@ -6,6 +6,7 @@ using System.Net;
 using System.Text;
 using Steamworks;
 using UnityEngine;
+using UnityEngine.EventSystems;
 
 namespace CoopMod
 {
@@ -202,15 +203,19 @@ namespace CoopMod
             if (Input.GetKeyDown(KeyCode.F8)) DumpPlayer();
             if (Input.GetKeyDown(KeyCode.F9) && !Online) ToggleTestPeer();
             if (Input.GetKeyDown(KeyCode.F1)) ToggleUi();
-            if (Online && Input.GetKeyDown(KeyCode.F2)) MakeInviteCode();
+            if (Input.GetKeyDown(KeyCode.F2)) HandleKey(KeyCode.F2);
             if (Online && botsWanted > 0 && Time.time >= nextBotAdd && WorldSync.InWorld()) { nextBotAdd = Time.time + 2f; botsWanted--; AddBot(); }
             if (Online && Input.GetKeyDown(KeyCode.F10)) AddBot();
             if (Online && Input.GetKeyDown(KeyCode.F11)) RemoveBot();
-            if (Online && Input.GetKeyDown(KeyCode.F3)) OpenJoinBox();
+            if (Input.GetKeyDown(KeyCode.F3)) HandleKey(KeyCode.F3);
             ChatKeys();
             RoomTick();
             PartyTick();
-            if (Online && !chatOpen && !joinOpen && !hostMenuOpen && Input.GetKeyDown(KeyCode.T) && WorldSync.InWorld()) OpenChat();
+            if (Input.GetKeyDown(KeyCode.T)) HandleKey(KeyCode.T);
+            SaveCodeOnce();
+            KeysHintOnce();
+            try { CoopHud.Tick(this); } catch (Exception e) { Log("ui: co-op hud: " + e.GetType().Name + " " + e.Message); }
+            try { MenuNotice.Tick(this); } catch (Exception e) { Log("ui: menu notice: " + e.GetType().Name + " " + e.Message); }
             if (!Online && Time.realtimeSinceStartup >= nextSteamTry) TryStartSteam();
             if (!Online && !CreatureSync.TestMode) CreatureSync.Idle();
             WorldSync.Transitions();
@@ -425,18 +430,66 @@ namespace CoopMod
 
         // ---- chat ----------------------------------------------------------------------------------------------------------------------
 
-        bool chatOpen; string chatText = ""; int chatOpenFrame;
+        bool chatOpen; string chatText = ""; int chatOpenFrame; bool chatEscArmed; int chatEscUpFrame = -1;
 
         public bool ChatOpen { get { return chatOpen; } }
-        public void OpenChatForTest(string text) { OpenChat(); chatText = text; chatOpenFrame = -10; }
+        public string ChatTextNow { get { return chatText; } }
+        public void OpenChatForTest(string text) { OpenChat(); chatText = text; if (CoopHud.SayField != null) CoopHud.SayField.text = text; chatOpenFrame = -10; }
         public void PressTForTest() { if (!chatOpen) OpenChat(); }
 
-        // Enter sends, Esc closes. Read from the keyboard directly every frame: the text box of the game's GUI eats the Enter key before any code around it can see it,
-        // which left the box open and the player unable to move. The box also closes by itself when the player leaves the world.
+        // The SAY> line on the HUD (CoopHud, a uGUI InputField): the field types, Enter sends, Esc closes. The field's keys are read from this
+        // frame's key events with the same CoopUI.ChatKeyAction the old box used; the raw keys are a safety net (a text box once ate the Enter key,
+        // which left the box open and the player unable to move). The line also closes by itself when the player leaves the world.
         void ChatKeys()
         {
             if (!chatOpen) return;
-            HandleChatKeys(Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter), Input.GetKeyDown(KeyCode.Escape));
+            if (!WorldSync.InWorld() || CoopHud.InMenu) { CloseChat(); return; }     // out of the world, or a game menu came up (it needs the keys)
+            KeepTypingOnTop(this);                                                    // a cutscene that started meanwhile does not get the typed keys
+            if (chatEscArmed) { WaitEscUp(); return; }
+            var f = CoopHud.SayField;
+            if (f != null)
+            {
+                f.Tick();
+                if (EventSystem.current != null && CoopHud.SayRoot != null && CoopHud.SayRoot.gameObject.activeInHierarchy && EventSystem.current.currentSelectedGameObject != CoopHud.SayRoot.gameObject)
+                    EventSystem.current.SetSelectedGameObject(CoopHud.SayRoot.gameObject);       // a click elsewhere took the selection: the line keeps it while open
+                if (f.isFocused) { ChatResult(f.Pump()); if (!chatOpen || chatEscArmed) return; }
+                else if (!f.Opening && Time.frameCount - chatOpenFrame > 1) f.Open();
+            }
+            HandleChatKeys(Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter), false);
+            if (chatOpen && Time.frameCount - chatOpenFrame > 1 && Input.GetKeyDown(KeyCode.Escape)) ArmChatEsc();
+        }
+
+        // what the field reported (CoopField.Submit / Cancel / None); the audit feeds keys through here too
+        void ChatResult(int what)
+        {
+            var f = CoopHud.SayField;
+            if (f != null) chatText = (f.text ?? "").Replace("\n", "").Replace("\r", "");      // a chat message is one line, whatever reaches the field
+            if (what == CoopField.Submit) HandleChatKeys(true, false);
+            else if (what == CoopField.Cancel) ArmChatEsc();
+        }
+
+        public int ChatFeedForTest(Event e)
+        {
+            var f = CoopHud.SayField;
+            if (!chatOpen || f == null) return -1;
+            int r = f.FeedForTest(e);
+            ChatResult(r);
+            return r;
+        }
+
+        // Esc: the line closes when the key is up, so the same key does not also reach the pause key (Start is Escape) once typing is over
+        void ArmChatEsc()
+        {
+            chatEscArmed = true; chatEscUpFrame = -1;
+            if (CoopHud.SayField != null) CoopHud.SayField.Close();
+        }
+
+        void WaitEscUp()
+        {
+            var e = new Event(); while (Event.PopEvent(e)) { }
+            if (Input.GetKey(KeyCode.Escape)) { chatEscUpFrame = -1; return; }
+            if (chatEscUpFrame < 0) { chatEscUpFrame = Time.frameCount; return; }
+            if (Time.frameCount > chatEscUpFrame) CloseChat();
         }
 
         public void HandleChatKeys(bool enter, bool escape)
@@ -448,8 +501,46 @@ namespace CoopMod
             else if (escape) CloseChat();
         }
 
-        void OpenChat() { chatOpen = true; chatText = ""; chatOpenFrame = Time.frameCount; InputManager.Push(this, "ui"); }
-        void CloseChat() { if (chatOpen) { chatOpen = false; chatText = ""; InputManager.Pop(this); } }
+        void OpenChat()
+        {
+            if (!chatOpen) InputManager.Push(this, "cooptype");
+            chatOpen = true; chatText = ""; chatOpenFrame = Time.frameCount; chatEscArmed = false;          // a set of its own: no game key acts while typing (the movement keys, the pause key)
+            var e = new Event(); while (Event.PopEvent(e)) { }     // the key that opened the line (T) is never typed into it
+            var f = CoopHud.SayField;
+            if (f != null) { f.text = ""; f.Open(); }
+            if (CoopHud.SayRoot != null) { CoopHud.SayRoot.gameObject.SetActive(true); if (EventSystem.current != null) EventSystem.current.SetSelectedGameObject(CoopHud.SayRoot.gameObject); }
+        }
+
+        void CloseChat()
+        {
+            if (!chatOpen) return;
+            chatOpen = false; chatText = ""; chatEscArmed = false;
+            var f = CoopHud.SayField;
+            if (f != null) { f.Close(); f.text = ""; }
+            if (CoopHud.SayRoot != null && EventSystem.current != null && EventSystem.current.currentSelectedGameObject == CoopHud.SayRoot.gameObject)
+            {
+                // a game menu that came up meanwhile gets its own line back (a null selection leaves its keys and the pad dead)
+                var m = CoopMenu.ActiveGameMenu() as UnityGUIMenu;
+                var back = m != null && m.m_defaultSelection != null && m.m_defaultSelection.activeInHierarchy ? m.m_defaultSelection : null;
+                EventSystem.current.SetSelectedGameObject(back);
+            }
+            InputManager.Pop(this);
+        }
+
+        // While I type, my typing set stays on top of the game's input stack: a cutscene that starts meanwhile pushes "cutscene" over it, and a
+        // space typed would skip that cutscene (for everybody, from the leader). It goes back under mine; it gets the keys when the typing ends.
+        public static void KeepTypingOnTop(object owner)
+        {
+            try
+            {
+                if (!Singleton<InputManager>.Exists || InputManager.TestString("cooptype")) return;
+                InputManager.Pop(owner);
+                InputManager.Push(owner, "cooptype");
+                TypingReclaims++;
+            }
+            catch (Exception) { }
+        }
+        public static int TypingReclaims;
 
         // Says something to everybody (and shows it to me). Empty or all-unprintable text is not sent.
         public void SendChat(string text)
@@ -863,46 +954,20 @@ namespace CoopMod
 
         InputMethodTracker trackerWeDisabled;
 
-        // While my window is open the game's own menus (Continue, New Game, ...) must not receive the clicks and keys meant for it: switch their event system off, and back on afterwards.
-        Behaviour menuEvents;
-        public bool MenusFrozenForTest { get { return menuEvents != null && !menuEvents.enabled; } }
-
-        void FreezeMenus(bool freeze)
-        {
-            try
-            {
-                if (freeze)
-                {
-                    var t = Type.GetType("UnityEngine.EventSystems.EventSystem, UnityEngine.UI");
-                    var cur = t == null ? null : t.GetProperty("current", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static).GetValue(null, null) as Behaviour;
-                    if (cur != null && cur.enabled) { cur.enabled = false; menuEvents = cur; }
-                }
-                else if (menuEvents != null) { menuEvents.enabled = true; menuEvents = null; }
-            }
-            catch (Exception e) { Log("freeze menus failed: " + e.GetType().Name + " " + e.Message); menuEvents = null; }
-        }
-
-        // The code box, the join window and the room menu need the mouse; the game hides and re-locks it every frame unless its tracker is switched off (as in the pause menu).
-        bool WantMouse { get { return joinOpen || hostMenuOpen; } }
+        // The co-op menu opened in the world by its key (F2 / F3, game time running) needs the mouse; the game hides and re-locks it every frame while
+        // time runs unless its tracker is switched off (as in the pause menu, where time stands still and the game frees it itself).
+        bool WantMouse { get { return CoopMenu.Showing && Time.timeScale > 1e-5f; } }
         public bool WantMouseForTest { get { return WantMouse; } }
         public void ApplyCursorForTest() { LateUpdate(); }
-        public void OpenJoinForTest() { if (!joinOpen) OpenJoinBox(); }
-        public void CloseJoinForTest() { JoinAct(CoopUI.JoinCancel, -1, noRooms); }   // the window's own CANCEL, as the player presses it
-
-        // what the join window's buttons do
-        void JoinAct(int act, int roomIdx, List<Room> rooms)
-        {
-            if (act == CoopUI.JoinCode) SubmitJoin();
-            else if (act == CoopUI.JoinCancel) CloseJoinBox();
-            else if (act == CoopUI.JoinRefresh && lobby != null) lobby.RequestRooms();
-            else if (act == CoopUI.JoinRoom && roomIdx >= 0 && roomIdx < rooms.Count) { lobby.Join(rooms[roomIdx].Id); CloseJoinBox(); }
-        }
+        public bool TrackerFreedForTest { get { return trackerWeDisabled != null; } }
+        public void OpenJoinForTest() { if (!joinOpen) OpenPage(CoopMenu.PageJoin); }
+        public void CloseJoinForTest() { var h = CoopMenu.Handler; if (joinOpen && h != null) h.BackForTest(); }   // the page's own BACK, as the player presses it
 
         void LateUpdate()
         {
             Speedrun.LateTick();
+            try { CoopHud.Draw(this); } catch (Exception e) { Log("ui: co-op hud draw: " + e.GetType().Name + " " + e.Message); }
             bool paused = Online && AnyConnected && Singleton<PauseManager>.Exists && PauseManager.Paused;
-            FreezeMenus(WantMouse);
             if (paused || WantMouse)
             {
                 if (paused && Time.timeScale < 0.5f) Time.timeScale = 1f;
@@ -1131,22 +1196,40 @@ namespace CoopMod
 
         static string ReadSmallFile(string f) { try { return File.Exists(f) ? File.ReadAllText(f) : ""; } catch (Exception) { return ""; } }
 
-        void DrawMarker(Peer p)
+        // The name tags over the other players (CoopHud.DrawTags): where each one's head is, and how far away.
+        public void FillTags(List<CoopHud.TagInfo> into)
         {
-            if (p.Clone == null || Camera.main == null) return;
-            var w2 = p.Clone.GetComponentInChildren<BipedWalkScript>();
             var a = GameObject.Find("Walkster");
             var w1 = a != null ? a.GetComponentInChildren<BipedWalkScript>() : null;
-            if (w2 == null || w1 == null) return;
-            Vector3 sp = Camera.main.WorldToScreenPoint(w2.body.position + Vector3.up * 1.2f);
-            if (sp.z <= 0f) return;
-            float d = Vector3.Distance(w1.body.position, w2.body.position);
-            CoopUI.Marker(new Vector2(sp.x, Screen.height - sp.y), ShowNames ? p.Label.ToUpper() : "", d);
+            if (w1 == null) return;
+            foreach (var p in peers)
+            {
+                if (p.Clone == null) continue;
+                var w2 = p.Clone.GetComponentInChildren<BipedWalkScript>();
+                if (w2 == null || w2.body == null) continue;
+                into.Add(new CoopHud.TagInfo { Name = p.Label, Head = w2.body.position + Vector3.up * 1.2f, Meters = Vector3.Distance(w1.body.position, w2.body.position) });
+            }
+        }
+
+        public bool IsOnline { get { return Online; } }
+
+        // what the B.U.D. LINK line on the HUD says (CoopHud.LinkSegments), from the same parts the old status panel used
+        public CoopHud.LinkState LinkStateNow()
+        {
+            var s = new CoopHud.LinkState();
+            s.Online = Online; s.InWorld = WorldSync.InWorld();
+            s.InLobby = lobby != null && lobby.InLobby;
+            s.Code = s.InLobby ? lobby.Code : "";
+            s.Notice = (WorldSync.Status + " " + SharedWorld.Status).Trim();
+            s.LobbyStatus = lobby != null ? lobby.Status : "";
+            s.Peers = new List<KeyValuePair<string, bool>>();
+            foreach (var p in peers) s.Peers.Add(new KeyValuePair<string, bool>(p.Label, p.Connected));
+            return s;
         }
 
         // ---- invite codes --------------------------------------------------------------------------------------------------------------
 
-        bool joinOpen, codeSaved; string joinText = "", joinMsg = ""; float codePopupUntil, joinOpenedAt;
+        bool codeSaved; string joinText = "", joinMsg = "";
 
         // F1: hide or show everything the mod draws (the setting is remembered in coop-ui-hidden.txt).
         void ToggleUi()
@@ -1161,25 +1244,23 @@ namespace CoopMod
             try { var te = new TextEditor(); te.content = new GUIContent(s); te.SelectAll(); te.Copy(); } catch (Exception) { }
         }
 
-        // F2: make a room (public or private) or, when I already have one, copy its code again. Friends type the code with F3 (or click a public room).
-        bool hostMenuOpen; float hostMenuAt;
+        // F2: make a room (public or private) or, when I already have one, copy its code again. Friends type the code with F3 (or pick a public room).
         readonly List<ulong> pending = new List<ulong>();     // players waiting for me (the host of a private room) to say yes or no
         float nextPoll; bool waitToasted;
-        List<Room> noRooms = new List<Room>();
 
         void MakeInviteCode()
         {
             if (lobby == null) return;
             if (lobby.InLobby) { CopyToClipboard(lobby.Code); joinMsg = "code copied again: " + lobby.Code; return; }
-            if (hostMenuOpen) { CloseHostMenu(); return; }
-            CloseJoinBox();
-            hostMenuOpen = true; hostMenuAt = Time.realtimeSinceStartup;
-            InputManager.Push(this, "ui");
+            OpenPage(CoopMenu.PageHost);          // the MAKE A ROOM page of the co-op menu (F2 again closes it)
         }
 
-        void CloseHostMenu() { if (hostMenuOpen) { hostMenuOpen = false; InputManager.Pop(this); } }
-
-        public void MakeRoom(bool open, bool listed) { if (lobby != null && !lobby.InLobby) lobby.Create(open, listed); }
+        public Action<bool, bool> RoomSinkForTest;     // the audit's stand-in for Steam: no real room is made
+        public void MakeRoom(bool open, bool listed)
+        {
+            if (RoomSinkForTest != null) { RoomSinkForTest(open, listed); return; }
+            if (lobby != null && !lobby.InLobby) lobby.Create(open, listed);
+        }
 
         // A member of my room showed up: connect when the room rules allow it; in a private room I am the one who decides.
         void OfferMember(ulong id)
@@ -1203,8 +1284,10 @@ namespace CoopMod
 
         public bool PendingFor(ulong id) { return pending.Contains(id); }
         public int PendingCount { get { return pending.Count; } }
+        public Action<bool> AnswerSinkForTest;
         public void AnswerJoinRequest(bool accept)
         {
+            if (pending.Count > 0 && AnswerSinkForTest != null) { pending.RemoveAt(0); AnswerSinkForTest(accept); return; }
             if (pending.Count == 0 || lobby == null) return;
             ulong id = pending[0]; pending.RemoveAt(0);
             if (accept) { lobby.Approve(id); AddMember(id); Log("room: accepted " + id); } else { lobby.Deny(id); Log("room: refused " + id); }
@@ -1213,17 +1296,15 @@ namespace CoopMod
         string PendingName()
         {
             if (pending.Count == 0) return "";
+            string fake; if (pendingNamesForTest.TryGetValue(pending[0], out fake)) return fake;
             try { return PlayerNames.Clean(SteamFriends.GetFriendPersonaName(new CSteamID(pending[0])), "A PLAYER"); } catch (Exception) { return "A PLAYER"; }
         }
 
         void RoomTick()
         {
             if (!Online || lobby == null || !lobby.InLobby) return;
-            if (pending.Count > 0 && !chatOpen && !joinOpen && !hostMenuOpen)
-            {
-                if (Input.GetKeyDown(KeyCode.Y)) AnswerJoinRequest(true);
-                else if (Input.GetKeyDown(KeyCode.N)) AnswerJoinRequest(false);
-            }
+            if (Input.GetKeyDown(KeyCode.Y)) HandleKey(KeyCode.Y);
+            else if (Input.GetKeyDown(KeyCode.N)) HandleKey(KeyCode.N);
             if (Time.realtimeSinceStartup < nextPoll) return;      // real time: the party lobby on the start screen runs with game time stopped
             nextPoll = Time.realtimeSinceStartup + 2f;
             lobby.Poll();
@@ -1238,30 +1319,42 @@ namespace CoopMod
             else waitToasted = false;
         }
 
+        // Once per room: the code goes to the clipboard and my-invite-code.txt, and M.O.M says it (it used to be a 12 s card drawn over the game).
+        // Every frame from Update (it used to run from OnGUI).
         void SaveCodeOnce()
         {
-            if (lobby == null || !lobby.InLobby || codeSaved) return;
-            codeSaved = true; codePopupUntil = Time.realtimeSinceStartup + 12f;
-            CopyToClipboard(lobby.Code);
-            try { File.WriteAllText(Here("my-invite-code.txt"), lobby.Code); } catch (Exception) { }
+            if (!Online || lobby == null || !lobby.InLobby || codeSaved) return;
+            CodeNotice(lobby.Code);
         }
 
-        // F3: the join window. While it is open the game ignores movement keys so typing does not move BUD, and the mouse works.
-        void OpenJoinBox()
+        // Once per game start, the first time I am in the world online without a room: M.O.M says the co-op keys (they used to stand on the
+        // status panel drawn over the game; they are also on the CO-OP page of the pause menu).
+        public const string KeysHint = "CO-OP: F2 MAKE A ROOM  F3 JOIN A ROOM  T CHAT";
+        bool keysHinted; float keysHintAt = -1f;
+        void KeysHintOnce()
         {
-            if (joinOpen) { CloseJoinBox(); return; }
-            CloseHostMenu();
-            joinOpen = true;
-            joinText = ""; joinMsg = ""; joinOpenedAt = Time.realtimeSinceStartup;
-            InputManager.Push(this, "ui");
-            if (lobby != null) lobby.RequestRooms();
+            if (keysHinted || !Online || lobby == null || lobby.InLobby || peers.Count > 0 || !WorldSync.InWorld()) { keysHintAt = -1f; return; }
+            if (keysHintAt < 0f) { keysHintAt = Time.realtimeSinceStartup + 4f; return; }      // a moment after arriving, not over the loading
+            if (Time.realtimeSinceStartup < keysHintAt || Time.timeScale < 0.001f) return;
+            keysHinted = true;
+            CoopUI.Toast(KeysHint);
+        }
+        public bool KeysHintedForTest { get { return keysHinted; } }
+
+        void CodeNotice(string code)
+        {
+            codeSaved = true;
+            CopyToClipboard(code);
+            try { File.WriteAllText(Here("my-invite-code.txt"), code); } catch (Exception) { }
+            CoopUI.Toast2("INVITE CODE " + code, "COPIED. FRIENDS PRESS F3 AND TYPE IT IN", 12f);
         }
 
-        void CloseJoinBox()
-        {
-            if (joinOpen) { joinOpen = false; InputManager.Pop(this); }
-            if (joinFromStart) { joinFromStart = false; FreezeMenus(false); reopenParty = true; }   // opened from the party menu on the start screen: back to it (menus live again first)
-        }
+        // the audit: a room was just made with this code (the next Update would do the same for a real room)
+        public void CodeNoticeForTest(string code) { codeSaved = false; CodeNotice(code); }
+        public bool CodeSavedForTest { get { return codeSaved; } set { codeSaved = value; } }
+
+        // F3: the JOIN A ROOM page of the co-op menu. While it is open the game ignores movement keys (the menu's "ui" input set) so typing does not move BUD.
+        void OpenJoinBox() { OpenPage(CoopMenu.PageJoin); }
         public bool JoinOpenForTest { get { return joinOpen; } }
 
         // ---- the CO-OP line of the pause menu (CoopMenu.cs) ---------------------------------------------------------------------------
@@ -1285,6 +1378,7 @@ namespace CoopMod
             s.AtStart = AtStartScreen;
             s.Following = following || hostStarting;
             s.Page = menuPage; s.FriendPage = friendPage;
+            if (!s.AtStart) s.Keys = peers.Count == 0 ? CoopMenu.KeysSolo : CoopMenu.KeysLinked;
             s.Invite = lobby != null && !s.InLobby && lobby.InviteWaiting ? NameOf(lobby.InviteFrom).ToUpper() : "";
             if (s.InLobby)
             {
@@ -1296,6 +1390,11 @@ namespace CoopMod
                 if (s.AtStart) s.Status = "";
                 if (menuPage == "friends") s.Friends = FriendsNow();
             }
+            s.JoinMsg = joinMsg;
+            s.Listing = lobby != null && lobby.Listing;
+            s.Rooms = RoomsNow();
+            s.RoomPage = roomPage;
+            s.RoomDefault = roomDefault;
             s.Screen = CoopMenu.ScreenNow;
             if (s.Screen == CoopMenu.ScreenSpeedrun)
             {
@@ -1308,12 +1407,13 @@ namespace CoopMod
 
         int CountConnected() { int n = 0; foreach (var p in peers) if (p.Connected) n++; return n; }
 
-        // What a line does. Lines that need typing (join code, chat) or the world (re-join) leave the menus first and open their window a moment later.
+        // What a line does. CHAT and RE-JOIN need the world: they leave the menus first and act a moment later.
         string afterMenu;
         public void CoopMenuAction(string id)
         {
             Log("ui: co-op menu: " + id);
             if (id.StartsWith("sr_")) { Speedrun.MenuAction(id, lobby != null && lobby.InLobby && lobby.Members().Count > 1, lobby != null && lobby.InLobby && lobby.IsOwner); return; }
+            if (PageAction(id)) return;      // the MAKE A ROOM / JOIN A ROOM pages (NativeMenus.cs)
             switch (id)
             {
                 case "host_friends": if (lobby != null && !lobby.InLobby) lobby.Create(false, false, true); break;
@@ -1331,16 +1431,7 @@ namespace CoopMod
                 case "let_in": AnswerJoinRequest(true); break;
                 case "refuse": AnswerJoinRequest(false); break;
                 case "display": ToggleUi(); break;
-                case "join":
-                    if (AtStartScreen && CoopMenu.Menu != null)
-                    {
-                        // on the start screen the start menu stays behind the join window; the party menu comes back when the window closes
-                        CoopMenu.Menu.Close();
-                        if (!joinOpen) OpenJoinBox();
-                        joinFromStart = true;
-                    }
-                    else { afterMenu = id; LeaveMenus(); }
-                    break;
+                case "join": SetPage(CoopMenu.PageJoin, EntryMenu); break;      // the JOIN A ROOM page, inside this menu (BACK comes back here)
                 case "chat": case "rejoin": afterMenu = id; LeaveMenus(); break;
                 default:
                     ulong friend;
@@ -1352,7 +1443,7 @@ namespace CoopMod
         // ---- the party (Party.cs): gather on the start screen, the leader starts, everybody follows ----------------------------------------
 
         string menuPage = ""; int friendPage;
-        bool following, hostStarting, myReady, wasInLobby, joinFromStart, reopenParty;
+        bool following, hostStarting, myReady, wasInLobby, reopenParty;
         string seenPlay;                                       // the leader's game I last saw started (so going back to the start screen is not undone)
         ulong connectAtStart;
         float nextParty, friendsAt = -99f;
@@ -1366,7 +1457,8 @@ namespace CoopMod
         // The start screen is ready for the party: past the intro screens, the start menu or the party menu on screen, no fade, no game starting.
         bool StartScreenIdle { get { return AtStartScreen && !FadeScreen.FadeInProgress && (CoopMenu.StartMenuShowing() || CoopMenu.PartyMenuShowing()); } }
 
-        public void MenuOpened() { menuPage = ""; reopenParty = false; }
+        // a page opened by its key survives a menu stacked on top and closed again (the pause menu); any other opening starts on the main page
+        public void MenuOpened() { if (!pageLive) { menuPage = ""; pageEntry = ""; } reopenParty = false; }
         // the party menu stays up while the game is starting (no start menu buttons racing it), and for a member of a party on the start screen:
         // everybody plays the leader's game, so a member gets the start menu (CONTINUE / NEW GAME of their own) only by leaving the party
         public bool BlockBack { get { return following || hostStarting || MemberAtStart || RaceArmed; } }
@@ -1588,10 +1680,8 @@ namespace CoopMod
         {
             if (Speedrun.SlotActive) return;
             if (following || hostStarting || lobby == null || !lobby.InLobby || lobby.IsOwner) return;
-            if (joinOpen) { joinFromStart = false; CloseJoinBox(); }
-            if (menuEvents != null) FreezeMenus(false);           // the join window had the menus paused: live again before a menu opens
             if (!StartScreenIdle || UnityEngine.EventSystems.EventSystem.current == null) return;   // intro screens, a fade, a game already starting, or menus not live yet: tried again shortly
-            CloseHostMenu();
+            if (joinOpen || hostMenuOpen) LeavePageNow();          // the join / room page gives way to the party page that shows the game starting
             reopenParty = false;
             if (!CoopMenu.PartyMenuShowing())
             {
@@ -1653,7 +1743,7 @@ namespace CoopMod
             if (reopenParty && !joinOpen && !following)
             {
                 if (!atStart) reopenParty = false;
-                else if (CoopMenu.StartMenuShowing() && !FadeScreen.FadeInProgress && menuEvents == null && UnityEngine.EventSystems.EventSystem.current != null) { reopenParty = false; CoopMenu.OpenFromStart(false); }
+                else if (CoopMenu.StartMenuShowing() && !FadeScreen.FadeInProgress && UnityEngine.EventSystems.EventSystem.current != null) { reopenParty = false; CoopMenu.OpenFromStart(false); }
             }
             if (atStart && !lobby.InLobby && WorldSync.GuestMode && !following) WorldSync.LeaveGuestMode();
             if (!lobby.InLobby || Time.realtimeSinceStartup < nextParty) return;
@@ -1680,8 +1770,7 @@ namespace CoopMod
             if (Singleton<PauseManager>.Exists && PauseManager.Paused) return;
             string id = afterMenu; afterMenu = null;
             if (!Online) return;
-            if (id == "join") { if (!joinOpen) OpenJoinBox(); }
-            else if (id == "chat") { if (!chatOpen && WorldSync.InWorld()) OpenChat(); }
+            if (id == "chat") { if (!chatOpen && WorldSync.InWorld()) OpenChat(); }
             else if (id == "rejoin") PullWorld();
         }
 
@@ -1689,53 +1778,19 @@ namespace CoopMod
         {
             ulong lobbyId;
             if (!InviteCode.TryDecode(joinText, out lobbyId)) { joinMsg = "That code does not look right. Letters and numbers, 13 in all."; return; }
-            if (lobby != null) lobby.Join(lobbyId);
-            CloseJoinBox();
+            JoinLobby(lobbyId);
+            PageDone();
         }
 
-        void OnGUI()
+        public Action<ulong> JoinSinkForTest;      // the audit's stand-in for Steam: no real room is joined
+        void JoinLobby(ulong lobbyId)
         {
-            SpeedrunUI.Draw();      // the speedrun timer needs no Steam
-            if (!Online) return;
-            SaveCodeOnce();
-            foreach (var p in peers) DrawMarker(p);
-            if ((!CoopUI.Hidden && ShowChat) || chatOpen) CoopUI.ChatLog(Chat.Lines, Time.realtimeSinceStartup, chatOpen);
-            if (chatOpen)
-            {
-                bool send, cancel;
-                chatText = CoopUI.ChatBox(chatText, out send, out cancel);
-                if (Time.frameCount - chatOpenFrame <= 1) chatText = "";     // the key that opened the box must not be typed into it
-                if (send) { SendChat(chatText); CloseChat(); } else if (cancel) CloseChat();
-            }
-
-            if (lobby != null && lobby.InLobby && Time.realtimeSinceStartup < codePopupUntil && !joinOpen && !hostMenuOpen && !CoopUI.Hidden) CoopUI.CodePopup(lobby.Code, codePopupUntil - 12f);
-            if (hostMenuOpen)
-            {
-                int pick = CoopUI.HostMenu(hostMenuAt, RoomRules.RoomChoice(ReadSmallFile(Here("coop-roomdefault.txt"))));
-                if (pick == 1 || pick == 2 || pick == 4) { CloseHostMenu(); MakeRoom(pick == 1, pick != 2); }
-                else if (pick == 3) CloseHostMenu();
-            }
-            if (joinOpen)
-            {
-                int act, roomIdx;
-                var rooms = lobby != null ? lobby.Rooms : noRooms;
-                joinText = CoopUI.JoinWindow(joinText, joinMsg, joinOpenedAt, rooms, lobby != null && lobby.Listing, out act, out roomIdx);
-                JoinAct(act, roomIdx, rooms);
-            }
-            if (pending.Count > 0 && !joinOpen && !hostMenuOpen && !CoopUI.Hidden) CoopUI.JoinRequest(PendingName());
-
-            var chips = new List<CoopUI.Chip>();
-            foreach (var p in peers) chips.Add(new CoopUI.Chip { Name = p.Label, Ok = p.Connected });
-            string hint = peers.Count == 0 ? "NOBODY YET   F2 MAKE A ROOM   F3 JOIN A ROOM   T CHAT"
-                                           : "F2 CODE   F3 JOIN   T CHAT   F7 RE-JOIN HOST WORLD   F4 FIND PLAYER";
-            string code = lobby != null && lobby.InLobby ? lobby.Code : "";
-            string notice = (WorldSync.Status + " " + SharedWorld.Status).Trim();
-            if (code.Length == 0 && lobby != null && lobby.Status.Length > 0) notice = (lobby.Status + "  " + notice).Trim();
-            var hostNow = HostPeer();
-            string me = string.IsNullOrEmpty(myName) ? "Player " + myNumber : myName;
-            string who = IAmHost ? me.ToUpper() + "  HOSTING" : hostNow == null ? me.ToUpper() + "  GUEST" : me.ToUpper() + "  GUEST OF " + hostNow.Label.ToUpper();
-            CoopUI.StatusBar(who, chips, hint, code, notice.ToUpper());
+            if (JoinSinkForTest != null) { JoinSinkForTest(lobbyId); return; }
+            if (lobby != null) lobby.Join(lobbyId);
         }
+
+        // Nothing is drawn with IMGUI any more (there is no OnGUI): the HUD pieces are on the mod's own uGUI canvas (CoopHud, HudPieces.cs),
+        // drawn from LateUpdate, and the windows are pages of the game's own menu (NativeMenus.cs).
 
         // ---- dumps ---------------------------------------------------------------------------------------------------------------------
 

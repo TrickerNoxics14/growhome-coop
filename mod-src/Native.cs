@@ -26,25 +26,32 @@ namespace CoopMod
         const int MaxPending = 6;
         const float StaleAfter = 15f;
 
-        class Pending { public string Text; public float Born; }
+        class Pending { public string Text, Top; public float Born, Seconds; }
         static readonly List<Pending> pending = new List<Pending>();
         static string activeName, activeText;
         static float activeSince, currentSince = -1f;
         static int serial;
 
         public static int NativeShown, OverlayUsed;        // counters for the audit
-        public static string LastNativeText = "";
+        public static string LastNativeText = "", LastNativeTop = "";
+        public static int Offers; public static string LastOffered = "";
 
         // ---- 2. messages --------------------------------------------------------------------------------------------------------------
 
         // Called by CoopUI.Toast. False means "show it on the overlay now".
-        public static bool Offer(string text)
+        public static bool Offer(string text) { return Offer(text, null, 0f); }
+
+        // top: the panel's top line instead of "M.O.M>>>"; seconds: how long it stays (0 = ShowSeconds)
+        public static bool Offer(string text, string top, float seconds)
         {
+            Offers++; LastOffered = (string.IsNullOrEmpty(top) ? "" : top + " | ") + text;
             if (!CanShow()) return false;
-            pending.Add(new Pending { Text = text, Born = Time.realtimeSinceStartup });
-            while (pending.Count > MaxPending) { ToOverlay(pending[0].Text); pending.RemoveAt(0); }
+            pending.Add(new Pending { Text = text, Top = top, Seconds = seconds, Born = Time.realtimeSinceStartup });
+            while (pending.Count > MaxPending) { ToOverlay(Flat(pending[0])); pending.RemoveAt(0); }
             return true;
         }
+
+        static string Flat(Pending p) { return string.IsNullOrEmpty(p.Top) ? p.Text : p.Top + "  " + p.Text; }
 
         public static bool CanShow()
         {
@@ -123,7 +130,7 @@ namespace CoopMod
                 CoopBehaviour.Log("ui: HUD message failed, using the overlay: " + SharedWorld.Short(e));
                 if (activeText != null && currentSince < 0f) ToOverlay(activeText);
                 activeName = null; activeText = null;
-                foreach (var p in pending) ToOverlay(p.Text);
+                foreach (var p in pending) ToOverlay(Flat(p));
                 pending.Clear();
             }
         }
@@ -146,7 +153,7 @@ namespace CoopMod
                     if (currentSince < 0f && now - activeSince > WaitLimit)
                     {
                         AbilityHUD.HideHUDMessage(activeName); ToOverlay(activeText); activeName = null;
-                        foreach (var p in pending) ToOverlay(p.Text);
+                        foreach (var p in pending) ToOverlay(Flat(p));
                         pending.Clear();
                     }
                     else if (currentSince >= 0f) { AbilityHUD.HideHUDMessage(activeName); activeName = null; }
@@ -157,24 +164,24 @@ namespace CoopMod
                     activeName = null;                                 // shown and timed out
                 }
             }
-            foreach (var p in pending) if (now - p.Born > StaleAfter) ToOverlay(p.Text);      // late, but never lost
+            foreach (var p in pending) if (now - p.Born > StaleAfter) ToOverlay(Flat(p));      // late, but never lost
             pending.RemoveAll(p => now - p.Born > StaleAfter);
             if (activeName != null || pending.Count == 0) return;
-            if (!CanShow()) { foreach (var p in pending) ToOverlay(p.Text); pending.Clear(); return; }
+            if (!CanShow()) { foreach (var p in pending) ToOverlay(Flat(p)); pending.Clear(); return; }
 
             var next = pending[0]; pending.RemoveAt(0);
-            var msg = new AbilityHUD.HUDMessage(MsgPrefix + (++serial), false, Priority, AbilityHUD.HUDFlags.SideHint, ShowSeconds);
+            var msg = new AbilityHUD.HUDMessage(MsgPrefix + (++serial), false, Priority, AbilityHUD.HUDFlags.SideHint, next.Seconds > 0f ? next.Seconds : ShowSeconds);
             string mom = Localisation.GetString("$MOM");
             msg.m_sideAlertText = string.Empty;
-            msg.m_stringTop = string.IsNullOrEmpty(mom) || mom == "$MOM" ? "M.O.M" : mom;
+            msg.m_stringTop = !string.IsNullOrEmpty(next.Top) ? next.Top : string.IsNullOrEmpty(mom) || mom == "$MOM" ? "M.O.M" : mom;
             msg.m_stringBottom = next.Text;
             msg.m_sprite = null;
             msg.m_hudFlags = AbilityHUD.HUDFlags.SideHint;
-            activeName = msg.m_name; activeText = next.Text; activeSince = now; currentSince = -1f;
+            activeName = msg.m_name; activeText = Flat(next); activeSince = now; currentSince = -1f;
             SaveMomTimer();
             AbilityHUD.ShowHUDMessage(msg);
             if (IsCurrent(activeName)) { currentSince = now; RestoreMomTimer(); }
-            NativeShown++; LastNativeText = next.Text;
+            NativeShown++; LastNativeText = next.Text; LastNativeTop = next.Top ?? "";
         }
 
         // For the audit: drop everything in flight without showing it anywhere.
@@ -217,11 +224,51 @@ namespace CoopMod
                 if (hud.m_canvas != null) Tree(sb, hud.m_canvas.transform, 0, 400);
             }
             else sb.AppendLine("---- hud: none in this level");
+            Probes(sb);
             // a fresh file each game start (only this session's levels), and never more than about 2 MB
             bool fresh = Dumps == 0 || !File.Exists(DumpPath) || new FileInfo(DumpPath).Length > 2000000;
             if (fresh) File.WriteAllText(DumpPath, sb.ToString()); else File.AppendAllText(DumpPath, sb.ToString());
             Dumps++;
             CoopBehaviour.Log("ui: wrote the game's " + gm.m_Menus.Count + " menus and HUD to coopmod-ui.log");
+        }
+
+        // Which keys stand behind the game's menu buttons (serialized data, not code), the event system, and whether the game font has the
+        // letters a typed invite code needs. Written to coopmod-ui.log; the keys also to the mod's log once.
+        public static string KeysLine = "";
+        static void Probes(StringBuilder sb)
+        {
+            sb.AppendLine("---- XInputMappings");
+            var keys = new StringBuilder();
+            try
+            {
+                foreach (var m in XInputMappings.Mappings)
+                {
+                    if (m == null) continue;
+                    string line = m.m_name + " type " + m.m_mappingType + " keys " + m.m_useKeyInput + " pad " + m.m_usePadInput + " button " + m.m_buttonValue + " axis " + m.m_axisValue
+                        + " +R " + m.m_positiveKeyRight + " -R " + m.m_negativeKeyRight + " +L " + m.m_positiveKeyLeft + " -L " + m.m_negativeKeyLeft + " both " + m.m_LeftAndRight;
+                    sb.AppendLine("mapping " + line);
+                    if (m.m_name == "Start" || m.m_name == "MenuCancel" || m.m_name == "Submit" || m.m_name == "Cancel")
+                        keys.Append(m.m_name + "=" + (m.m_useKeyInput ? m.m_positiveKeyRight + "/" + m.m_positiveKeyLeft : "no key") + " ");
+                }
+            }
+            catch (Exception e) { sb.AppendLine("mappings: could not read " + SharedWorld.Short(e)); }
+            var es = UnityEngine.EventSystems.EventSystem.current;
+            if (es != null)
+            {
+                var mods = new StringBuilder();
+                foreach (var c in es.GetComponents<UnityEngine.EventSystems.BaseInputModule>()) mods.Append(c.GetType().Name + (c.enabled ? "" : "(off)") + " ");
+                sb.AppendLine("---- EventSystem " + PathOf(es.transform) + " modules " + mods);
+            }
+            else sb.AppendLine("---- EventSystem: none");
+            Font f = null;
+            try { if (Singleton<AbilityHUD>.Exists && Singleton<AbilityHUD>.Instance.m_textBottomLine != null) f = Singleton<AbilityHUD>.Instance.m_textBottomLine.font; } catch (Exception) { }
+            if (f != null)
+            {
+                string missing = "";
+                foreach (char c in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-.,!?:'") if (!f.HasCharacter(c)) missing += c;
+                sb.AppendLine("---- font " + f.name + " dynamic " + f.dynamic + " missing \"" + missing + "\"");
+            }
+            if (keys.Length > 0 && KeysLine.Length == 0) { KeysLine = keys.ToString().Trim(); CoopBehaviour.Log("ui: menu keys " + KeysLine); }
         }
 
         public static string PathOf(Transform t)

@@ -337,6 +337,7 @@ namespace CoopMod
                 yield return StartCoroutine(WaitReal(0.3f));
                 bool bRunning = relB == 0 && endB == 0;
                 for (int i = 0; i < 4; i++) { cbk.T += 250; yield return StartCoroutine(WaitReal(0.3f)); }
+                yield return StartCoroutine(WaitRealUntil(() => endB >= 1 && File.Exists(b.HangFile), 2f));   // the guard thread polls every 250 ms: give it its turn (the fake clock stands still meanwhile)
                 bool bEnded = relB == 1 && endB == 1 && File.Exists(b.HangFile) && ReadShared(Path.Combine(dir, "b.log")).Contains("ending the game");
                 for (int i = 0; i < 4; i++) { cbk.T += 250; yield return StartCoroutine(WaitReal(0.3f)); }
                 bool bOnce = endB == 1;
@@ -355,14 +356,19 @@ namespace CoopMod
                 d0.Guard(400, 900, 1500, delegate { relD++; }, delegate { endD++; }); d0.Start(); dogs.Add(d0);
                 for (int i = 0; i < 10; i++) { cd.T += 16; d0.Beat(); yield return null; }
                 for (int i = 0; i < 2; i++) { cd.T += 250; yield return StartCoroutine(WaitReal(0.3f)); }
+                yield return StartCoroutine(WaitRealUntil(() => relD >= 1 && File.Exists(d0.HangFile), 2f));   // as above: the last step crossed the release limit; the end limit stays far off (the clock stands still)
                 bool dNoted = relD == 1 && File.Exists(d0.HangFile);
+                int relDAt = relD; bool noteDAt = File.Exists(d0.HangFile);      // for the detail only: which part of "noted" was missing
                 for (int i = 0; i < 10; i++) { cd.T += 16; d0.Beat(); yield return null; }
                 yield return StartCoroutine(WaitReal(0.6f));
+                yield return StartCoroutine(WaitRealUntil(() => d0.NotesCleared >= 1, 2f));
                 bool dCleared = dNoted && endD == 0 && !File.Exists(d0.HangFile) && d0.NotesCleared == 1;
 
                 Check("HANG-GUARD", "a frozen game gets the mouse back (and a fullscreen one is minimized) first, is ended after the limit and only once, leaves coop-hang.txt for the launcher; a game still loading gets the longer limit; a PC that slept is no freeze; a stall that recovers removes its note again",
                     aEarly && aEnded && bRunning && bEnded && bOnce && cSlept && dCleared,
-                    "loading: released=" + aEarly + " ended at the longer limit=" + aEnded + "; frozen: quiet while running=" + bRunning + " released+ended=" + bEnded + " once=" + bOnce + "; slept: ignored=" + cSlept + "; recovered: noted=" + dNoted + " note removed=" + dCleared);
+                    "loading: released=" + aEarly + " ended at the longer limit=" + aEnded + "; frozen: quiet while running=" + bRunning + " released+ended=" + bEnded + " once=" + bOnce + "; slept: ignored=" + cSlept + "; recovered: noted=" + dNoted + " note removed=" + dCleared
+                    + (bEnded && bOnce ? "" : " | B: released " + relB + " ended " + endB + " note " + File.Exists(b.HangFile) + " log: " + ReadShared(Path.Combine(dir, "b.log")).Replace("\r", "").Replace("\n", " / "))
+                    + (dCleared ? "" : " | D: released " + relDAt + " (guard " + d0.Releases + ") note " + noteDAt + " ended " + endD + " notes removed " + d0.NotesCleared + " log: " + ReadShared(Path.Combine(dir, "d.log")).Replace("\r", "").Replace("\n", " / ")));
             }
             finally
             {

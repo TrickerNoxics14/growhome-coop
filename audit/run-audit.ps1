@@ -270,6 +270,18 @@ function Test-ResultText([string[]]$Lines, [bool]$NeedSender) {
     if (-not ($body | Where-Object { $_ -like 'NOTE scenario complete*' })) { [void]$p.Add('the scenario never reached its end') }
     return @($p)
 }
+# The groups whose live sections report a network SENDER, from the "# senders:" line of check-groups.txt (one place for the rule and the tags).
+function Get-SenderGroups {
+    $gf = Join-Path $AuditDir 'check-groups.txt'
+    if (Test-Path $gf) { foreach ($line in Get-Content $gf) { if ($line -match '^\s*#\s*senders:\s*(.+)$') { return @($Matches[1].Split(',') | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ }) } } }
+    return @('movement', 'party', 'session')
+}
+# A full run always needs a sender; a quick run only when one of its game groups has a section that reports one. A quick run with no
+# groups chosen (-Quick alone: $Groups is $null) runs every section, so it needs one as well.
+function Get-NeedSender([bool]$IsQuick, $Groups, $SenderGroups) {
+    if (-not $IsQuick -or $null -eq $Groups) { return $true }
+    return (@($Groups | Where-Object { $SenderGroups -contains $_ }).Count -gt 0)
+}
 function Test-ResultScorer {
     $good = @('RESULT pass=2 fail=0 warn=0', 'SECTION a BEGIN', 'SECTION plant 1-2 BEGIN', 'SECTION plant 1-2 END 0', 'CHECK X PASS one', 'SENDER s 0 5', 'CHECK Y PASS two', 'SECTION a END 2', 'NOTE scenario complete: every chosen section ran', 'DONE')
     $cases = [ordered]@{
@@ -288,7 +300,23 @@ function Test-ResultScorer {
         $c = $cases[$name]; $got = @(Test-ResultText $c.L $true)
         if (($got.Count -gt 0) -ne $c.Bad) { $wrong += "$name -> $(if ($got.Count) { $got -join '; ' } else { 'accepted' })" }
     }
-    return [pscustomobject]@{ Cases = $cases.Count; Wrong = $wrong }
+    # the sender rule is scoped to the groups a quick run chose, and stays strict in a full run
+    $noSender = @($good | Where-Object { $_ -notlike 'SENDER*' })
+    $sg = @(Get-SenderGroups)
+    $scoped = [ordered]@{
+        'quick launcher, no sender' = @{ Q = $true; G = @(); Bad = $false }
+        'quick ui, no sender'       = @{ Q = $true; G = @('ui'); Bad = $false }
+        'quick party, no sender'    = @{ Q = $true; G = @('party'); Bad = $true }
+        'quick ui+session, no sender' = @{ Q = $true; G = @('ui', 'session'); Bad = $true }
+        'quick all, no sender'      = @{ Q = $true; G = $null; Bad = $true }
+        'full, no sender'           = @{ Q = $false; G = $null; Bad = $true }
+    }
+    foreach ($name in $scoped.Keys) {
+        $c = $scoped[$name]; $got = @(Test-ResultText $noSender (Get-NeedSender $c.Q $c.G $sg))
+        if (($got.Count -gt 0) -ne $c.Bad) { $wrong += "$name -> $(if ($got.Count) { $got -join '; ' } else { 'accepted' })" }
+    }
+    if (@('movement', 'party', 'session' | Where-Object { $sg -notcontains $_ }).Count -gt 0) { $wrong += "sender groups from check-groups.txt: $($sg -join ',')" }
+    return [pscustomobject]@{ Cases = $cases.Count + $scoped.Count + 1; Wrong = $wrong }
 }
 
 function Invoke-Build([string]$Project, [string]$Label) {
@@ -521,7 +549,7 @@ else {
     # the mod's result file is whole: the scorer first proves on made-up texts that it fails every hollow shape, then reads the real file
     $scorer = Test-ResultScorer
     $resultLines = if (Test-Path (Join-Path $Report 'game-coop-selftest-result.txt')) { @(Get-Content (Join-Path $Report 'game-coop-selftest-result.txt')) } else { @() }
-    $needSender = -not $Quick -or ($GameGroups | Where-Object { 'movement', 'party', 'session' -contains $_ })
+    $needSender = Get-NeedSender ([bool]$Quick) $GameGroups @(Get-SenderGroups)
     $resultProblems = @(Test-ResultText $resultLines ([bool]$needSender))
     $sectionCount = @($resultLines | Where-Object { $_ -match '^SECTION .+ BEGIN$' }).Count
     $senderCount = @($resultLines | Where-Object { $_ -match '^SENDER ' }).Count

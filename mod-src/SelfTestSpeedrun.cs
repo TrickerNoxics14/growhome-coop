@@ -307,10 +307,7 @@ namespace CoopMod
             SrCheck("SR-LIVESPLIT", "with no LiveSplit running a send costs the game under 5 ms and throws nothing", !threw && took < 5.0, took.ToString("F2") + " ms, threw=" + threw + ", client: " + none.LastProblem);
         }
 
-        // ---- the UI test draws from OnGUI ------------------------------------------------------------------------------------------------
-
-        List<SrRun> srUiRuns;
-        RaceFsm srUiRace;
+        // ---- the UI test lays sample runs out on the real HUD canvas (SpeedrunUI.PreviewForTest; there is no OnGUI any more) ----
 
         // a race of 8 in every state: finished (a tie), running, offline, reset, DNF, not started
         static RaceFsm SrUiRaceSample()
@@ -325,21 +322,6 @@ namespace CoopMod
             f.Find(4).Offline = true; f.Find(8).Name = "EVE";
             return f;
         }
-        int srUiFrames; string srUiProblem = "";
-
-        void OnGUI()
-        {
-            if (srUiRuns == null) return;
-            try
-            {
-                foreach (var r in srUiRuns) { SpeedrunUI.DrawFor(r, Screen.width, Screen.height, true); if (r.State == CoopMod.SrState.Finished) SpeedrunUI.DrawResults(r, Screen.width, Screen.height); }
-                if (srUiRace != null) { float b = SpeedrunUI.DrawRaceStrip(srUiRace, Screen.width, Screen.height, 200f, Time.realtimeSinceStartup); SpeedrunUI.DrawCountdown(2.4f, Screen.width, Screen.height); SpeedrunUI.DrawCountdown(-0.2f, Screen.width, Screen.height); SpeedrunUI.DrawRaceResults(srUiRace, Screen.width, Screen.height); if (b <= 0f) srUiProblem = "strip"; }
-                SpeedrunUI.Draw();
-                if (Event.current.type == EventType.Repaint) srUiFrames++;
-            }
-            catch (Exception e) { srUiProblem = Describe(e); }
-        }
-
         static List<SrRun> SrUiSamples()
         {
             long fake = 1000;
@@ -533,11 +515,33 @@ namespace CoopMod
                 SrCheck("SR-PERF", "the speedrun tick costs under 0.2 ms and makes almost no garbage (300 ticks in a running game)", avg < 0.2 && grew < 64 * 1024, avg.ToString("F4") + " ms each, heap +" + grew + " bytes");
             });
 
-            srUiRace = SrUiRaceSample();
-            srUiRuns = SrUiSamples(); srUiFrames = 0; srUiProblem = "";
-            yield return null; yield return null; yield return null; yield return null; yield return null;
-            srUiRuns = null;
-            srUiRace = null;
+            // the sample runs and race are laid out on the real HUD canvas (uGUI, the game's fonts) for a few frames, in place of the live timer
+            SpeedrunUI.PreviewForTest(SrUiSamples(), SrUiRaceSample());
+            float pv0 = Time.realtimeSinceStartup;
+            while (SpeedrunUI.PreviewFrames < 5 && Time.realtimeSinceStartup - pv0 < 3f) yield return null;
+            int srUiFrames = SpeedrunUI.PreviewFrames; string srUiProblem = SpeedrunUI.PreviewProblem;
+            var uiTexts = CoopHud.SpeedrunLayer.ShownTexts(); var uiFixed = CoopHud.SpeedrunLayer.ShownFixed();
+            var uiImgs = CoopHud.SpeedrunLayer.ShownImages();
+            var cam = CoopHud.Canvas != null ? CoopHud.Canvas.worldCamera : null;
+            var uiProbs = new List<string>();
+            if (CoopHud.Canvas == null || cam == null) uiProbs.Add("no HUD canvas");
+            if (uiTexts.Count < 20) uiProbs.Add(uiTexts.Count + " texts shown");
+            int timesFixed = 0, bad = 0; string badWhat = "";
+            var buf = new Vector3[4];
+            for (int i = 0; i < uiTexts.Count; i++)
+            {
+                var t = uiTexts[i];
+                if (t.font != HudLayer.FontFor(uiFixed[i])) { bad++; badWhat = "font " + (t.font == null ? "none" : t.font.name) + " on \"" + t.text + "\""; }
+                if (uiFixed[i] && System.Text.RegularExpressions.Regex.IsMatch(t.text, "[0-9]:[0-9][0-9]")) timesFixed++;
+                if (cam != null) { var r = CoopHud.ScreenRect(t.rectTransform, buf, cam); if (r.xMin < -2f || r.yMin < -2f || r.xMax > Screen.width + 2f || r.yMax > Screen.height + 2f) { bad++; badWhat = "off screen \"" + t.text + "\" " + r; } }
+            }
+            if (cam != null) foreach (var im in uiImgs) { var r = CoopHud.ScreenRect(im.rectTransform, buf, cam); if (r.xMin < -8f || r.yMin < -2f || r.xMax > Screen.width + 8f || r.yMax > Screen.height + 2f) { bad++; badWhat = "panel off screen " + r; } }
+            if (bad > 0) uiProbs.Add(bad + " wrong, e.g. " + badWhat);
+            if (timesFixed < 5) uiProbs.Add("only " + timesFixed + " times in the fixed-width font");
+            string sawText = CoopHud.SpeedrunLayer.AllText();
+            foreach (string want in new[] { "RACE RESULTS", "RACE IN 3", "GO", "INVALID", "SUM OF BEST" }) if (!sawText.Contains(want)) uiProbs.Add("no \"" + want + "\"");
+            SpeedrunUI.StopPreview();
+            yield return null; yield return null;
             bool lay = true; string layDetail = "";
             foreach (var size in new[] { new Vector2(800, 450), new Vector2(1280, 720), new Vector2(3840, 2160) })
             {
@@ -548,8 +552,9 @@ namespace CoopMod
                 bool inside = p.xMin >= 0 && p.yMin >= 0 && p.xMax <= size.x && p.yMax <= size.y && q.xMin >= 0 && q.yMin >= 0 && q.xMax <= size.x && q.yMax <= size.y;
                 if (!inside) { lay = false; layDetail += " " + size + " panel " + p + " card " + q; }
             }
-            SrCheck("SR-UI", "the timer panel draws every state (running, finished with a new PB, cannot finish, reset and invalid, co-op), the race strip, countdown and race results for 8 racers, without an exception and stays on screen at 800x450, 1280x720 and 4K",
-                srUiFrames >= 3 && srUiProblem.Length == 0 && lay && SpeedrunUI.LastProblem.Length == 0, srUiFrames + " frames drawn" + (srUiProblem.Length > 0 ? ", problem " + srUiProblem : "") + (SpeedrunUI.LastProblem.Length > 0 ? ", live panel " + SpeedrunUI.LastProblem : "") + (lay ? "" : ", off screen:" + layDetail));
+            SrCheck("SR-UI", "the timer panel in every state (running, finished with a new PB, cannot finish, reset and invalid, co-op), the race strip, countdown and race results for 8 racers are laid out on the mod's uGUI HUD canvas (no IMGUI) in the game's fonts (times in block_fixed), inside the screen, without an exception; the pure layout stays on screen at 800x450, 1280x720 and 4K",
+                srUiFrames >= 3 && srUiProblem.Length == 0 && lay && uiProbs.Count == 0 && SpeedrunUI.LastProblem.Length == 0,
+                srUiFrames + " frames laid out, " + uiTexts.Count + " texts, " + timesFixed + " fixed-width times" + (srUiProblem.Length > 0 ? ", problem " + srUiProblem : "") + (uiProbs.Count > 0 ? "; " + string.Join("; ", uiProbs.ToArray()) : "") + (SpeedrunUI.LastProblem.Length > 0 ? ", live panel " + SpeedrunUI.LastProblem : "") + (lay ? "" : ", off screen:" + layDetail));
 
             bool slotWrote = false;
             Try("SR-SLOT-ISOLATION", "forced saves in the slot ran", delegate
